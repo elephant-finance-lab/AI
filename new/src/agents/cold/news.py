@@ -240,7 +240,7 @@ class NewsAgent(AgentBase):
         message_scope = f"ticker:{ticker}" if ticker else "market"
 
         # micro memory 저장
-        if ticker:
+        if ticker and not llm_fallback:  # fallback 결과는 memory 저장 스킵 (C18 집계 왜곡 방지)
             self._save_memory(
                 ticker,
                 "micro",
@@ -421,7 +421,7 @@ class NewsAgent(AgentBase):
             "narrative": narrative,
             "impacted_tickers": impacted_tickers,
             "impacted_sectors": [],
-            "confidence": 0.5,
+            "confidence": 0.3,  # heuristic fallback은 신뢰도 낮음을 명시
         }
 
     @staticmethod
