@@ -163,6 +163,7 @@ class RiskFastAgent(AgentBase):
         # 규칙 4: top10 붕괴 (recent_bars 유무와 무관 — high 트리거 카운트 기반)
         # high 트리거는 drop 규칙 결과에서 카운트 (PPO top10 종목 중)
         ppo_top10 = self._extract_top10(ranking)
+        drop_tickers: list[str] = []   #drop_tickers는 규칙 1에서 정의됨, 규칙 1이 실행 안 됐는데 규칙 4에서 drop_tickers를 참조하려 하면 NameError가 날 수 있어서 수정
         if recent_bars is not None and ppo_top10:
             high_count = sum(
                 1 for t in ppo_top10

@@ -40,7 +40,8 @@ class LGBMQuant:
         if self._model is None:
             self.load()
 
-        assert self._model is not None
+        if self._model is None:  # assert 대신 명시적 체크
+            raise RuntimeError("모델 로드 실패. ModelRegistry 확인 필요.")
         feature_cols = self._feature_cols()
         if self._is_batch(features):
             tickers = list(features.keys())
