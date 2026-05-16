@@ -344,5 +344,8 @@ class RiskAgentSlow(AgentBase):
             "risk_level": parsed.get("risk_level"),
             "regime_signal": parsed.get("regime_signal"),
         }
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.error("[risk_slow] macro memory 저장 실패: path=%s error=%s", path, e)
