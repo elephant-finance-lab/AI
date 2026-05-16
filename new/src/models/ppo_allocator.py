@@ -281,32 +281,28 @@ class PPOAllocator:
         return {t: float(w) for (t, _), w in zip(top_k_items, weights)}
 
     def _apply_max_single_cap(self, weights: dict[str, float]) -> dict[str, float]:
-        """max_single_name 초과분 redistribute.
-
-        초과분은 균등 분배 (간단). Sprint 3+에서 PPO로 정교화.
-        """
-        if not weights:
-            return weights
-
-        capped: dict[str, float] = {}
-        overflow = 0.0
-        for t, w in weights.items():
-            if w > self._max_single_name:
-                overflow += w - self._max_single_name
-                capped[t] = self._max_single_name
-            else:
-                capped[t] = w
-
-        if overflow > 1e-9 and capped:
-            # 아직 cap 안 된 종목에만 재분배
+        capped = dict(weights)
+        
+        for _ in range(len(capped)):  # 최대 종목 수만큼 반복
+            overflow = 0.0
+            for t, w in capped.items():
+                if w > self._max_single_name:
+                    overflow += w - self._max_single_name
+                    capped[t] = self._max_single_name
+            
+            if overflow < 1e-9:
+                break
+                
             free_tickers = [
                 t for t in capped if capped[t] < self._max_single_name - 1e-9
             ]
-            if free_tickers:
-                add = overflow / len(free_tickers)
-                for t in free_tickers:
-                    new_w = min(self._max_single_name, capped[t] + add)
-                    capped[t] = new_w
+            if not free_tickers:
+                break  # 모든 종목이 cap → overflow 소진 불가
+                
+            add = overflow / len(free_tickers)
+            for t in free_tickers:
+                capped[t] = min(self._max_single_name, capped[t] + add)
+        
         return capped
 
     def _resolve_regime_multiplier(
