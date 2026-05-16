@@ -115,13 +115,13 @@ class WalkForwardSplitter:
             train_ts = self._dates_to_ts(train_dates, date_to_ts)
             test_ts = self._dates_to_ts(test_dates, date_to_ts)
 
-            # Purge: train 말단 purge_bars 개 ts_close 제거 (분봉 기준)
-            if self.purge_bars > 0 and len(train_ts) > self.purge_bars:
-                train_ts = train_ts[:-self.purge_bars]
+            # purge
+            if self.purge_bars > 0:
+                train_ts = train_ts[:-self.purge_bars] if len(train_ts) > self.purge_bars else []
 
-            # Embargo: test 시작 embargo_bars 개 ts_close 제거
-            if self.embargo_bars > 0 and len(test_ts) > self.embargo_bars:
-                test_ts = test_ts[self.embargo_bars:]
+            # embargo
+            if self.embargo_bars > 0:
+                test_ts = test_ts[self.embargo_bars:] if len(test_ts) > self.embargo_bars else []
 
             if len(train_ts) == 0 or len(test_ts) == 0:
                 logger.warning(
