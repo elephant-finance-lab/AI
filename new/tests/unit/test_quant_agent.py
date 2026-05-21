@@ -1018,6 +1018,47 @@ def test_detect_anomalies_warmup_insufficient(agent_active: QuantAgent) -> None:
     assert anomalies == []
 
 
+def test_detect_anomalies_noisy_volume_detects_spike(agent_active: QuantAgent) -> None:
+    """noisy volume + config threshold 초과 spike → volume_spike anomaly 1건.
+
+    spike value는 config volume_zscore_threshold + 2.0 margin 기반으로 동적 계산한다.
+    config 값이 바뀌어도 테스트 robust. 가격은 변화 없게 두어 intraday_drop은 트리거 안 함.
+    """
+    threshold = agent_active._volume_zscore_threshold
+
+    rng = np.random.default_rng(11)
+    bars = _make_bars("005930", n=65, seed=11)
+    for b in bars:
+        b["volume"] = float(1000.0 + rng.normal(0, 100))
+    for bar in bars:
+        agent_active.on_bar(bar)
+
+    hist_volumes = np.array([b["volume"] for b in bars])
+    hist_mean = float(hist_volumes.mean())
+    hist_std = float(hist_volumes.std(ddof=0))
+    spike_volume = hist_mean + (threshold + 2.0) * hist_std
+
+    last_close = bars[-1]["close"]
+    spike_bar = {
+        "ticker": "005930",
+        "ts_close": "2026-04-20T10:05:00+09:00",
+        "open": last_close,
+        "high": last_close,
+        "low": last_close,
+        "close": last_close,
+        "volume": spike_volume,
+    }
+    agent_active.on_bar(spike_bar)
+
+    anomalies = agent_active.detect_anomalies(
+        ["005930"], asof="2026-04-20T10:05:00+09:00",
+    )
+    assert len(anomalies) == 1
+    assert anomalies[0]["ticker"] == "005930"
+    assert anomalies[0]["anomaly_type"] == "volume_spike"
+    assert anomalies[0]["z_score"] > threshold
+
+
 # ====================================================================== #
 # 6. latency_percentiles
 # ====================================================================== #

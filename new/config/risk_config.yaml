@@ -1043,6 +1043,7 @@ quant_agent:
     rationale: "Quant Agent threshold / warmup 변경은 Hot Path 레이턴시와 시그널 정확성 직결. Mode B 자동 조정 금지."
   warmup_bars: 60                    # cross-sectional score 생성 전 필요한 최소 bar 수
   anomaly_zscore_threshold: 3.0      # intraday drop anomaly 임계 (|z| > threshold → anomaly)
+  volume_zscore_threshold: 3.5       # volume spike anomaly 임계 (z > +threshold → anomaly). 거래량 분포 right-tail 고려 가격보다 보수적.
   latency_window: 1000               # p50/p95/p99 측정 창 (최근 N개 기록)
   latency_p95_target_ms: 100         # Hot Path SLA (경고/로그용, enforcement는 S1-9 Monitor)
   investor_flow_stale_sec: 1800      # 수급 side-channel snapshot stale 기준

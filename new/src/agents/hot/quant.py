@@ -83,6 +83,9 @@ class QuantAgent(AgentBase):
         self._anomaly_zscore_threshold: float = float(
             qa_cfg["anomaly_zscore_threshold"]
         )
+        self._volume_zscore_threshold: float = float(
+            qa_cfg["volume_zscore_threshold"]
+        )
         self._latency_window: int = int(qa_cfg["latency_window"])
         self._latency_p95_target_ms: float = float(qa_cfg["latency_p95_target_ms"])
         self._investor_flow_stale_sec: int = int(qa_cfg["investor_flow_stale_sec"])
@@ -436,10 +439,11 @@ class QuantAgent(AgentBase):
     ) -> list[dict[str, Any]]:
         """Cross-sectional anomaly 탐지.
 
-        현재 1종: intraday_drop (1min return z-score < -threshold, rolling 60 bars).
-        architecture.md trigger_catalog intraday_drop_anomaly 대응.
+        2종: intraday_drop (1min return z < -threshold), volume_spike (volume z > +threshold).
+        한 ticker가 양쪽에 걸리면 두 entry 반환. architecture.md trigger_catalog 대응.
 
         Returns: list of {ticker, anomaly_type, z_score, ts}
+          anomaly_type enum: "intraday_drop" | "volume_spike"
         """
         if not str(asof or "").strip():
             return []
@@ -451,13 +455,22 @@ class QuantAgent(AgentBase):
             bars = self._bar_buffer.get_latest_asof(ticker, max_window, asof=asof)
             if len(bars) < self._warmup_bars:
                 continue
-            is_anom, z = self._is_intraday_drop_anomaly(bars)
-            if is_anom:
+            ts_close = bars[-1].get("ts_close", str(asof))
+            is_drop, drop_z = self._is_intraday_drop_anomaly(bars)
+            if is_drop:
                 out.append({
                     "ticker": ticker,
                     "anomaly_type": "intraday_drop",
-                    "z_score": z,
-                    "ts": bars[-1].get("ts_close", str(asof)),
+                    "z_score": drop_z,
+                    "ts": ts_close,
+                })
+            is_spike, spike_z = self._is_volume_spike_anomaly(bars)
+            if is_spike:
+                out.append({
+                    "ticker": ticker,
+                    "anomaly_type": "volume_spike",
+                    "z_score": spike_z,
+                    "ts": ts_close,
                 })
         return out
 
@@ -1007,3 +1020,30 @@ class QuantAgent(AgentBase):
         latest_ret = float(returns[-1])
         z = (latest_ret - mu) / sigma
         return (z < -self._anomaly_zscore_threshold), z
+
+    def _is_volume_spike_anomaly(
+        self,
+        bars: list[dict[str, Any]],
+    ) -> tuple[bool, float]:
+        """volume z-score > +threshold → anomaly.
+
+        rolling 60 bars 내 volume 분포 기준. 최신 bar 제외 mean/std로 current bar outlier 판정.
+        가격과 달리 단방향(spike만, 거래량 0은 휴장/거래 정지 별도 처리).
+        Returns: (is_anomaly, z_score).
+        """
+        if len(bars) < self._warmup_bars:
+            return False, 0.0
+
+        volumes = np.array(
+            [float(b.get("volume", 0.0)) for b in bars], dtype=float
+        )
+        hist = volumes[:-1]
+        if len(hist) < 2:
+            return False, 0.0
+        mu = float(hist.mean())
+        sigma = float(hist.std(ddof=0))
+        if sigma < 1e-8:
+            return False, 0.0
+
+        z = (float(volumes[-1]) - mu) / sigma
+        return (z > self._volume_zscore_threshold), z
