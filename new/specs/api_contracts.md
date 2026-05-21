@@ -410,8 +410,24 @@ sla:
       modes: "cold (Kanana 우선) | mode_b (GPT-4o 전용) | hot (RuntimeError)"
       callers: "risk_config.yaml llm_budget.budget_allocation keys"
       returns: "LLMCallResult (success, model_used, content, latency_ms, tokens, cost_usd, error, fallback_used, circuit_state)"
+      mode_validation: "exact enum only. UNKNOWN_LLM_MODE fail-closed for noncanonical mode strings."
+      force_model_policy: "Cold Path force_model='gpt-4o' 금지. GPT-4o는 fallback 또는 mode_b에서만 허용."
+      provider_policy:
+        hot_path: "LLM API 호출 금지. call(mode='hot')는 HOT_PATH_LLM_FORBIDDEN"
+        cold_path_primary: "Kanana-o 우선. OpenAI-compatible chat.completions.create(model='kanana-o', messages=[...])"
+        cold_path_fallback: "Kanana 실패/한도초과/circuit OPEN 시 GPT-4o fallback"
+        mode_b: "GPT-4o 전용. Kanana daily budget 미사용"
+        mode_b_runtime_guard: "ELEPHANT_MODE=mode_b + mode_b_scheduler.execution_window 내부에서만 허용"
+        kanana_api_url: "KANANA_API_URL은 full endpoint가 아니라 /v1 base URL. 기존 로컬 .env 호환을 위해 KANANA_BASE_URL alias도 허용하되, KANANA_API_URL이 우선한다."
+        kanana_schema_policy: "json_schema 지원을 가정하지 않음. prompt-level JSON instruction + local parser fail-closed"
+        gpt_storage_policy: "store=false 명시"
+        gpt_schema_policy: "structured_schema가 있으면 strict response_format json_schema 사용"
       errors:
         - HOT_PATH_LLM_FORBIDDEN        # mode='hot' 시도
+        - UNKNOWN_LLM_MODE              # cold|mode_b|hot 외 문자열
+        - COLD_PATH_GPT_FORCE_FORBIDDEN # Cold Path GPT 직접 지정
+        - MODE_B_ENV_REQUIRED           # ELEPHANT_MODE != mode_b
+        - MODE_B_WINDOW_FORBIDDEN       # execution_window 밖 Mode B GPT 호출
         - MODE_B_CALLER_FORBIDDEN       # mode='mode_b' + caller not in mode_b_allowed_callers
         - DAILY_LIMIT_REACHED           # budget 소진 → fallback trigger
         - CALLER_QUOTA_EXCEEDED         # caller allocation 소진 → fallback trigger
@@ -444,7 +460,7 @@ sla:
         - dart_alert
       llm_caller: "news_agent"
       llm_mode: "cold"
-      llm_parsing: "heuristic (Sprint 4 S4-6 이전). 실 API 도입 시 JSON mode로 교체 예정."
+      llm_parsing: "Kanana prompt-level JSON instruction + local parser fail-closed. GPT fallback은 C5 strict json_schema 정책 사용 가능."
       narrative_max_chars_source: "news_filter.yaml text_pack_settings.narrative_max_chars (SSOT, 기본 200). 코드 하드코딩 금지 (불변 원칙 5)."
       status: "done"  # S2-7 실구현 완료 (2026-04-23)
     # S2-8 실구현 완료 (2026-04-26)
@@ -687,7 +703,7 @@ input:
     effect: |
       uncertainty_score >= risk_config.yaml fda_uncertainty_link.uncertainty_threshold
       → veto_prior 가 fda_uncertainty_link.veto_prior_boost 만큼 상향
-      → final_decision.veto 확률 증가 (reason_code 후보: NEWS_DIVERGENCE)
+      → final_decision.veto 확률 증가 (reason_code 후보: NEWS_COMMUNITY_DIVERGENCE)
     pit_safety: "실시간 publish 가능. divergence 는 장전 배치 점수 기반 → PIT-Safe"
 output:
   final_decision:
@@ -696,7 +712,7 @@ output:
     target_weights: {ticker: float}   # read-only echo
     order_deltas: [{ticker: string, side: string, qty: int, reason: string}]  # read-only echo
     veto_reason: string|null
-    reason_code: string|null                # cause 분류 코드 (cause-centric 설계용). approve/veto 양쪽에서 항상 채움. S2-9 완료 (2026-04-26) enum 최종 확정 7종: NEWS_DIVERGENCE / RISK_FAST_TRIGGER / DEBATE_CONFLICT / NORMAL_APPROVE / TIMEOUT / QUANT_ANOMALY / MISSING_PORTFOLIO_PATCH. SSOT: risk_config.yaml reason_code_catalog (status=final).
+    reason_code: string|null                # cause 분류 코드 (cause-centric 설계용). approve/veto 양쪽에서 항상 채움. S2-9 완료 (2026-04-26) + community risk sidecar 확장(2026-05-18) enum 11종: NEWS_DIVERGENCE / RISK_FAST_TRIGGER / COMMUNITY_LIVE_PROXY_RISK / NEWS_COMMUNITY_DIVERGENCE / COMMUNITY_TIMESTAMP_WEAK / COMMUNITY_MANIPULATION_FLAG / DEBATE_CONFLICT / NORMAL_APPROVE / TIMEOUT / QUANT_ANOMALY / MISSING_PORTFOLIO_PATCH. SSOT: risk_config.yaml reason_code_catalog (status=final).
     risk_overrides: [{rule: string, original: string, override: string, justification: string}]
     confidence: float
     expiry: ISO8601

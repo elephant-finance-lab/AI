@@ -88,6 +88,16 @@ class QuantAgent(AgentBase):
         self._investor_flow_stale_sec: int = int(qa_cfg["investor_flow_stale_sec"])
 
         self._multi_scale_windows: list[int] = list(pp_cfg["multi_scale_windows"])
+        self._intraday_feature_windows: list[int] = [
+            int(value)
+            for value in pp_cfg.get("intraday_feature_windows", [])
+            if int(value) > 0
+        ]
+        self._volume_z_windows: list[int] = [
+            int(value)
+            for value in pp_cfg.get("volume_z_windows", [])
+            if int(value) > 0
+        ]
         self._mad_constant: float = float(pp_cfg["mad_constant"])
         self._outlier_cap_z: float = float(pp_cfg["outlier_cap_z"])
         self._base_feature_cols: list[str] = list(pp_cfg["feature_cols"])
@@ -320,7 +330,7 @@ class QuantAgent(AgentBase):
             }
 
         # BarBuffer batch load. asof 이후 bar가 buffer에 선적재되어도 추론에서 제외한다.
-        max_window = int(self._multi_scale_windows[-1])
+        max_window = self._feature_window_limit()
         bars_batch = self._bar_buffer.get_batch_asof(
             padded_all,
             max_window,
@@ -434,7 +444,7 @@ class QuantAgent(AgentBase):
         if not str(asof or "").strip():
             return []
         padded_all = [pad_ticker(str(t)) for t in tickers]
-        max_window = int(self._multi_scale_windows[-1])
+        max_window = self._feature_window_limit()
         out: list[dict[str, Any]] = []
 
         for ticker in padded_all:
@@ -610,8 +620,9 @@ class QuantAgent(AgentBase):
         if len(bars) < self._warmup_bars:
             return None
 
-        close_values = [float(b["close"]) for b in bars if "close" in b]
-        n_missing = len(bars) - len(close_values)
+        usable_bars = [b for b in bars if "close" in b]
+        close_values = [float(b["close"]) for b in usable_bars]
+        n_missing = len(bars) - len(usable_bars)
         if n_missing > 0:
             logger.warning(
                 "[quant_agent] %d개 bar에 'close' 필드 누락. 필터 후 n=%d",
@@ -620,6 +631,18 @@ class QuantAgent(AgentBase):
         closes = np.array(close_values, dtype=float)
         if len(closes) < self._warmup_bars:
             return None
+        highs = np.array(
+            [float(b.get("high", b["close"])) for b in usable_bars],
+            dtype=float,
+        )
+        lows = np.array(
+            [float(b.get("low", b["close"])) for b in usable_bars],
+            dtype=float,
+        )
+        volumes = np.array(
+            [float(b.get("volume", 0.0)) for b in usable_bars],
+            dtype=float,
+        )
 
         _, w5, w30, w60 = self._multi_scale_windows
         last = float(closes[-1])
@@ -677,6 +700,63 @@ class QuantAgent(AgentBase):
             "feat_30m_vol": feat_30m_vol,
             "feat_60m_trend": feat_60m_trend,
         }
+        for window in self._intraday_feature_windows:
+            ret_key = f"feat_{window}m_ret"
+            if len(closes) > window and closes[-window - 1] > 1e-8:
+                feats[ret_key] = last / float(closes[-window - 1]) - 1.0
+            else:
+                feats[ret_key] = 0.0
+
+            vol_key = f"feat_{window}m_vol"
+            if len(closes) >= window:
+                last_window = closes[-window:]
+                mean_value = float(last_window.mean())
+                feats[vol_key] = (
+                    float(last_window.std(ddof=1) / mean_value)
+                    if mean_value > 1e-8
+                    else 0.0
+                )
+            else:
+                feats[vol_key] = 0.0
+
+        for window in self._volume_z_windows:
+            key = f"feat_volume_{window}m_z"
+            if len(volumes) >= window:
+                last_window = volumes[-window:]
+                mean_value = float(last_window.mean())
+                std_value = float(last_window.std(ddof=1))
+                z_value = (float(volumes[-1]) - mean_value) / std_value if std_value > 1e-8 else 0.0
+                feats[key] = float(
+                    np.clip(z_value, -self._outlier_cap_z, self._outlier_cap_z)
+                )
+            else:
+                feats[key] = 0.0
+
+        session_indices = self._latest_session_indices(usable_bars)
+        session_closes = closes[session_indices]
+        session_highs = highs[session_indices]
+        session_lows = lows[session_indices]
+        session_volumes = volumes[session_indices]
+        session_open = float(session_closes[0]) if len(session_closes) else last
+        feats["feat_open_to_now_ret"] = (
+            last / session_open - 1.0 if session_open > 1e-8 else 0.0
+        )
+        cumulative_volume = float(session_volumes.sum()) if len(session_volumes) else 0.0
+        if cumulative_volume > 1e-8:
+            session_vwap = float(np.sum(session_closes * session_volumes) / cumulative_volume)
+            feats["feat_session_vwap_gap"] = (
+                last / session_vwap - 1.0 if session_vwap > 1e-8 else 0.0
+            )
+        else:
+            feats["feat_session_vwap_gap"] = 0.0
+        session_high = float(session_highs.max()) if len(session_highs) else last
+        session_low = float(session_lows.min()) if len(session_lows) else last
+        session_range = session_high - session_low
+        feats["feat_session_high_pos"] = (
+            float(np.clip((last - session_low) / session_range, 0.0, 1.0))
+            if session_range > 1e-8
+            else 0.0
+        )
         ds_values: dict[str, float] = {}
         if self._dual_source_feature_cols and ticker is not None and asof is not None:
             ds_values = self._load_dual_source_features(ticker=ticker, asof=asof)
@@ -698,6 +778,46 @@ class QuantAgent(AgentBase):
         for col in self._exogenous_feature_cols:
             feats[col] = float(exog_values.get(col, self._exogenous_defaults.get(col, 0.0)))
         return feats
+
+    def _feature_window_limit(self) -> int:
+        feature_cols = (
+            self._inference_feature_cols
+            if self.has_model
+            else self._feature_cols
+        )
+        windows = list(self._multi_scale_windows)
+        for col in feature_cols:
+            if not col.startswith("feat_"):
+                continue
+            token = col.removeprefix("feat_").split("_", 1)[0]
+            if token.endswith("m"):
+                try:
+                    windows.append(int(token[:-1]))
+                except ValueError:
+                    continue
+            elif col.startswith("feat_volume_") and token == "volume":
+                parts = col.removeprefix("feat_volume_").split("_", 1)
+                if parts and parts[0].endswith("m"):
+                    try:
+                        windows.append(int(parts[0][:-1]))
+                    except ValueError:
+                        continue
+        return int(max(windows)) if windows else int(self._multi_scale_windows[-1])
+
+    @staticmethod
+    def _latest_session_indices(bars: list[dict[str, Any]]) -> np.ndarray:
+        if not bars:
+            return np.array([], dtype=int)
+        latest_key = str(bars[-1].get("ts_close", ""))[:10]
+        if not latest_key:
+            return np.arange(len(bars), dtype=int)
+        indices = [
+            idx for idx, bar in enumerate(bars)
+            if str(bar.get("ts_close", ""))[:10] == latest_key
+        ]
+        if not indices:
+            return np.arange(len(bars), dtype=int)
+        return np.array(indices, dtype=int)
 
     def _get_exogenous_features(
         self,

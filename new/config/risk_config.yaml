@@ -113,6 +113,14 @@ execution:
   mode: "mock"                 # mock | paper | live
   live_enabled: false          # true면 실계좌 주문 가능
   allowed_order_types: ["00"]  # KIS ORD_DVSN whitelist. 기본 지정가만 허용
+  price_tick_bands:
+    - {min_price: 0, tick_size: 1}
+    - {min_price: 1000, tick_size: 5}
+    - {min_price: 5000, tick_size: 10}
+    - {min_price: 10000, tick_size: 50}
+    - {min_price: 50000, tick_size: 100}
+    - {min_price: 100000, tick_size: 500}
+    - {min_price: 500000, tick_size: 1000}
 
 paper_trading:
   report_dir: "artifacts/reports/paper_trading"
@@ -133,9 +141,10 @@ paper_auto_trading:
   require_active_model: true
   default_max_cycles: 1
   default_interval_sec: 60
-  max_tickers: 20
+  max_tickers: 30
   max_orders_per_cycle: 3
-  max_order_qty_per_order: 1
+  max_order_qty_per_order: 2
+  max_order_qty_per_order_prelive_cap: 2
   allow_market_order: false
   use_latest_ppo_policy_if_available: true
 
@@ -272,14 +281,12 @@ backtest_agent:
       allowed_model_data_source: "artifact_bars"
       allowed_stock_statuses:
         - "active"
-        - "pending_data"
       allowed_sector_statuses:
         - "confirmed"
-        - "confirmed_pending_data"
-      include_pending_data_tickers: true
+      include_pending_data_tickers: false
       missing_final_dataset_action: "block_deploy"
       rehearsal_business_days: 80
-      rationale: "80거래일 수집은 paper/flow rehearsal 전용이다. v1 실계좌 직전 C12/C14/deploy_quality PASS는 KIS retention probe로 확인된 20250509~20260515 30종목 1분봉 학습 메타데이터가 있어야만 허용한다. 10년 벤더 데이터는 v2 research 목표로 분리한다."
+      rationale: "80거래일 수집은 paper/flow rehearsal 전용이다. v1 실계좌 직전 C12/C14/deploy_quality PASS는 KIS retention probe로 확인된 20250509~20260515 30종목 active 1분봉 학습 메타데이터가 있어야만 허용한다. 10년 벤더 데이터는 v2 research 목표로 분리한다."
     on_pass:
       human_approval_required: true
       action: "deploy"
@@ -675,6 +682,7 @@ event_normalizer:
 auth_defaults:
   retry_delays: [1, 2, 4]      # 지수 백오프 3회
   refresh_margin_sec: 300       # 만료 5분 전 auto refresh
+  token_rate_limit_retry_sec: 65 # KIS tokenP 1분 1회 제한(EGW00133) 회피용
 
 # S1-0 추가 — BarBuffer ring buffer 설정
 # bar_buffer.py가 참조. 하드코딩 금지 원칙 (불변 원칙 5).
@@ -685,6 +693,8 @@ bar_buffer:
 # preprocessor.py + dataset_builder.py가 참조. architecture.md §2.3 ①②③ 단계 파라미터.
 preprocessor:
   multi_scale_windows: [1, 5, 30, 60]
+  intraday_feature_windows: [30, 60, 120, 195]
+  volume_z_windows: [30, 195]
   mad_constant: 1.4826          # MAD → 표준편차 근사 상수 (정규분포 가정)
   outlier_cap_z: 5.0            # |z| > 5 clip
   missing_policy: "forward_fill_then_cross_mean"
@@ -775,6 +785,10 @@ reason_code_catalog:
   candidates:
     - NEWS_DIVERGENCE
     - RISK_FAST_TRIGGER
+    - COMMUNITY_LIVE_PROXY_RISK
+    - NEWS_COMMUNITY_DIVERGENCE
+    - COMMUNITY_TIMESTAMP_WEAK
+    - COMMUNITY_MANIPULATION_FLAG
     - DEBATE_CONFLICT
     - NORMAL_APPROVE
     - TIMEOUT
@@ -870,21 +884,22 @@ live_data_readiness:
 label:
   mode_b_metadata:
     schema_version: "1.0.0"
-    data_version: "1.1.0"
-    last_updated: "2026-05-12"
-    updated_by: "codex_label_leakage_fix"
+    data_version: "1.2.0"
+    last_updated: "2026-05-18"
+    updated_by: "codex_cost_aware_195m_gate"
     mode_b_editable: false           # label 정의 변경은 모델 학습 목표 변경 = 프로젝트 근본
     human_approval_required: true
     backup_retention_days: 365
     update_trigger: "manual_only"
-    rationale: "label horizon/생성 범위 변경은 전체 학습 재실행 필요. 거래일 경계 밖 forward label 참조를 금지한다."
+    rationale: "DatasetBuilder 기본 label은 5m_ret로 유지한다. 다만 service-policy는 195분 보유/cooldown과 15bps 비용을 요구하므로 deploy 후보 target은 deploy_target_cols allowlist로 명시 통제한다."
   generation_version: "session_local_v2"
   session_scope: "ticker_trading_day"
-  horizon_bars: 5                   # 5분 후 수익률 (사용자 결정 2026-04-20)
+  horizon_bars: 5                   # 기본 학습/보조 label 생성 기준
   target_col: "label_5m_ret"
+  deploy_target_cols: ["label_5m_ret", "label_195m_net_ret"]
   rank_col: "cs_rank"
   leakage_guard: true               # label 생성 시 미래 참조 검증 필수
-  drop_last_n_bars: 5               # 마지막 5 bars는 label 없음 (t+5 참조 불가)
+  drop_last_n_bars: 5               # 기본 5m label 마지막 5 bars는 label 없음
 
 # Evaluation Metrics 파라미터 (S1-0 Batch B metrics.py 참조)
 # C12/C13 metrics 7종 (ic/icir/rank_ic/arr/ir/mdd/sr) 전부 계산.
@@ -923,20 +938,21 @@ service_policy_replay:
   mode_b_metadata:
     schema_version: "1.0.0"
     data_version: "1.0.0"
-    last_updated: "2026-05-13"
-    updated_by: "codex_service_policy_controls"
+    last_updated: "2026-05-19"
+    updated_by: "codex_service_policy_optimization"
     mode_b_editable: false
     human_approval_required: true
     backup_retention_days: 365
     update_trigger: "manual_review_then_mode_b_replay"
     rationale: "KIS paper cash-account replay의 거래 빈도/회전율 제약. 변경 시 성과 비교 불가하므로 C12/service-policy 전체 재실행 필요."
-  # 2026-05-13 cost-policy grid (BUNDLE-20260512-QUICKCHECK, 20260414~20260503):
-  # 30m decision stride + half-session hold/cooldown reduced churn and passed
-  # service-policy constraints without relaxing gate thresholds.
-  decision_stride_bars: 30
+  # 2026-05-19 deterministic sweep (BUNDLE-20260518-195M0001, 20250917~20251021):
+  # top_k=0.25 kept order caps/cooldown intact while improving service-policy replay
+  # from +23.45bps/SR 5.19 to +47.31bps/SR 7.21. Re-run C12/C14 after changes.
+  top_k_fraction: 0.25
+  decision_stride_bars: 15
   min_holding_bars: 195
   rebalance_cooldown_bars: 195
-  no_trade_score_spread: 0.0
+  no_trade_score_spread: 0.027
   allow_position_pyramiding: false
   turnover_budget_hard_stop: true
   min_expected_net_alpha_bps: 15.0
@@ -1193,7 +1209,7 @@ fda_uncertainty_link:
 
   uncertainty_threshold: 0.5             # 이 값 이상이면 veto_prior boost (dual_source.divergence_threshold 와 일치)
   veto_prior_boost: 0.15                 # 기본 veto prior 에 +15%p 가산
-  reason_code_on_boost: "NEWS_DIVERGENCE"  # C9 reason_code_catalog 후보 (Sprint 2 enum 확정)
+  reason_code_on_boost: "NEWS_COMMUNITY_DIVERGENCE"  # C9 reason_code_catalog 후보 (community risk sidecar)
   source_channel: "uncertainty_signal"   # C4 SharedMessagePool channel (message_taxonomy.publish_channels 등록)
 
 # ============================================================
