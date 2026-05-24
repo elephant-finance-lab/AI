@@ -133,6 +133,7 @@ class QuantAgent(AgentBase):
         self._inference_feature_cols: list[str] = list(self._feature_cols)
         self._dual_source_loader = dual_source_loader
         self._dual_source_cache: dict[str, list[dict[str, Any]]] = {}
+        self._dual_source_load_errors: dict[str, str] = {}
         self._investor_flow_snapshot: dict[str, dict[str, Any]] = {}
         self._exogenous_snapshot: dict[str, dict[str, float]] = {}
         self._exogenous_snapshot_meta: dict[str, dict[str, Any]] = {}
@@ -382,28 +383,32 @@ class QuantAgent(AgentBase):
             feature_matrix.append(feature_vec)
             valid_tickers.append(ticker)
 
+        if feature_blockers:
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            self._latency_records.append(elapsed_ms)
+            missing_cols = sorted({
+                str(blocker.get("missing_feature", ""))
+                for blocker in feature_blockers
+                if blocker.get("missing_feature")
+            })
+            return {
+                "tickers": [],
+                "scores": {},
+                "ts": asof_str,
+                "mode": "blocked",
+                "blocker": "required_feature_missing",
+                "blockers": feature_blockers,
+                "missing_feature_cols": missing_cols,
+                "required_dual_source_cols": sorted(required_dual_source_cols),
+                "warmup_tickers": warmup_tickers,
+                "latency_ms": elapsed_ms,
+                "n_tickers": 0,
+                "valid_ticker_count_before_block": len(valid_tickers),
+            }
+
         if not valid_tickers:
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             self._latency_records.append(elapsed_ms)
-            if feature_blockers:
-                missing_cols = sorted({
-                    str(blocker.get("missing_feature", ""))
-                    for blocker in feature_blockers
-                    if blocker.get("missing_feature")
-                })
-                return {
-                    "tickers": [],
-                    "scores": {},
-                    "ts": asof_str,
-                    "mode": "blocked",
-                    "blocker": "required_feature_missing",
-                    "blockers": feature_blockers,
-                    "missing_feature_cols": missing_cols,
-                    "required_dual_source_cols": sorted(required_dual_source_cols),
-                    "warmup_tickers": warmup_tickers,
-                    "latency_ms": elapsed_ms,
-                    "n_tickers": 0,
-                }
             return {
                 "tickers": [],
                 "scores": {},
@@ -969,13 +974,22 @@ class QuantAgent(AgentBase):
                     col,
                 )
                 if feature_blockers is not None:
+                    date_key = self._asof_to_yyyymmdd(asof or "")
+                    artifact_path = (
+                        f"artifacts/dual_source/{date_key}.json"
+                        if date_key
+                        else "artifacts/dual_source/YYYYMMDD.json"
+                    )
                     feature_blockers.append({
                         "ticker": ticker,
                         "blocker": "required_dual_source_feature_missing",
                         "missing_feature": col,
                         "required_dual_source_cols": sorted(required_ds),
-                        "artifact_date": self._asof_to_yyyymmdd(asof or ""),
+                        "required_artifacts": [artifact_path],
+                        "missing_artifacts": [artifact_path],
+                        "artifact_date": date_key,
                         "loader_configured": self._dual_source_loader is not None,
+                        "loader_error": self._dual_source_load_errors.get(date_key),
                     })
                 return None
             else:
@@ -1149,6 +1163,7 @@ class QuantAgent(AgentBase):
             loader = self._dual_source_loader
             if loader is None:
                 records = []
+                self._dual_source_load_errors[date_key] = "dual_source_loader_missing"
             else:
                 try:
                     records = loader(date_key)
@@ -1158,6 +1173,7 @@ class QuantAgent(AgentBase):
                         date_key,
                         e,
                     )
+                    self._dual_source_load_errors[date_key] = str(e)
                     records = []
             self._dual_source_cache[date_key] = [
                 item for item in records if isinstance(item, dict)
@@ -1183,10 +1199,22 @@ class QuantAgent(AgentBase):
     def _dual_source_record_usable(self, item: dict[str, Any], asof: str) -> bool:
         """Dual-Source score metadata must not be newer than Hot Path asof."""
         asof_dt = self._parse_snapshot_dt(asof)
+        asof_date_key = asof_dt.strftime("%Y%m%d")
+        batch_date = item.get("batch_date")
+        if batch_date not in (None, ""):
+            batch_date_key = self._asof_to_yyyymmdd(str(batch_date))
+            if batch_date_key != asof_date_key:
+                logger.warning(
+                    "[quant_agent] Dual-Source batch_date mismatch: %s != %s. record skip",
+                    batch_date_key,
+                    asof_date_key,
+                )
+                return False
         for key in ("snapshot_ts", "generated_at"):
             raw = item.get(key)
             if raw in (None, ""):
-                continue
+                logger.warning("[quant_agent] Dual-Source %s 누락. record skip", key)
+                return False
             try:
                 ts = self._parse_snapshot_dt(raw)
             except (TypeError, ValueError) as e:
@@ -1194,6 +1222,14 @@ class QuantAgent(AgentBase):
                     "[quant_agent] Dual-Source %s 파싱 실패: %s. record skip",
                     key,
                     e,
+                )
+                return False
+            if ts.strftime("%Y%m%d") != asof_date_key:
+                logger.warning(
+                    "[quant_agent] Dual-Source %s date mismatch: %s != %s. record skip",
+                    key,
+                    ts.strftime("%Y%m%d"),
+                    asof_date_key,
                 )
                 return False
             if ts > asof_dt:

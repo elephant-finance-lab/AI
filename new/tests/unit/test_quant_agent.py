@@ -703,6 +703,9 @@ def test_score_cross_section_uses_dual_source_scores(
         loader_calls.append(date_str)
         return [{
             "ticker": "005930",
+            "batch_date": "2026-04-20",
+            "snapshot_ts": "2026-04-20T10:00:00+09:00",
+            "generated_at": "2026-04-20T10:00:00+09:00",
             "news_score_t": 0.7,
             "comm_score_t_1": 0.3,
             "comm_score_t_2": 0.1,
@@ -768,6 +771,8 @@ def test_dual_source_cache_rechecks_asof_on_each_lookup(
         loader_calls.append(date_str)
         return [{
             "ticker": "005930",
+            "batch_date": "2026-04-20",
+            "snapshot_ts": "2026-04-20T10:30:00+09:00",
             "generated_at": "2026-04-20T10:30:00+09:00",
             "news_score_t": 0.7,
             "comm_score_t_1": 0.3,
@@ -801,6 +806,9 @@ def test_score_cross_section_blocks_invalid_model_predictions(
     def loader(_date_str: str | None) -> list[dict[str, Any]]:
         return [{
             "ticker": "005930",
+            "batch_date": "2026-04-20",
+            "snapshot_ts": "2026-04-20T10:00:00+09:00",
+            "generated_at": "2026-04-20T10:00:00+09:00",
             "news_score_t": 0.7,
             "comm_score_t_1": 0.3,
             "comm_score_t_2": 0.1,
@@ -1141,7 +1149,13 @@ def test_score_cross_section_requires_only_model_metadata_dual_source_cols(
     )
 
     def loader(_date: str | None) -> list[dict[str, Any]]:
-        return [{"ticker": "005930", "news_score_t": 0.7}]
+        return [{
+            "ticker": "005930",
+            "batch_date": "2026-04-20",
+            "snapshot_ts": "2026-04-20T10:00:00+09:00",
+            "generated_at": "2026-04-20T10:00:00+09:00",
+            "news_score_t": 0.7,
+        }]
 
     agent = QuantAgent(registry=reg, bar_buffer=BarBuffer(), dual_source_loader=loader)
     for bar in _make_bars("005930", n=65):
