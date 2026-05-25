@@ -7,6 +7,7 @@ reports and logs stay under the ignored runs/ directory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -27,6 +28,22 @@ SCRIPT_PATH = Path(__file__).resolve()
 DEFAULT_REPO_ROOT = SCRIPT_PATH.parents[3]
 DEFAULT_CONFIG = SCRIPT_PATH.with_name("policies_5track.yaml")
 RUNS_DIR = SCRIPT_PATH.with_name("runs")
+STABLE_PAPER_BUNDLE_ID = "BUNDLE-20260521-POSTCLOSE"
+STABLE_PAPER_REGISTRY_REL = Path(
+    "artifacts/lgbm_paper_candidate/BUNDLE-20260521-POSTCLOSE"
+)
+
+KIS_TARGET_ENV_KEYS = [
+    "KIS_MODE",
+    "KIS_APP_KEY",
+    "KIS_APP_SECRET",
+    "KIS_ACCOUNT_NUMBER",
+    "KIS_ACCOUNT_PRODUCT_CODE",
+    "KIS_PAPER_APP_KEY",
+    "KIS_PAPER_APP_SECRET",
+    "KIS_PAPER_ACCOUNT_NUMBER",
+    "KIS_PAPER_ACCOUNT_PRODUCT_CODE",
+]
 
 RUNTIME_OVERRIDE_KEYS = {
     "max_orders_per_cycle",
@@ -83,6 +100,36 @@ def _safety_flags(*, external_kis_api: bool = False) -> dict[str, bool | str]:
     }
 
 
+def _model_positioning(bundle_id: str) -> dict[str, Any]:
+    is_stable_baseline = bundle_id == STABLE_PAPER_BUNDLE_ID
+    return {
+        "bundle_id": bundle_id,
+        "role": "stable_paper_baseline" if is_stable_baseline else "unsupported_non_baseline",
+        "global_optimum_claim_allowed": False,
+        "production_deploy_candidate": False,
+        "research_benchmark_anchor": is_stable_baseline,
+        "fixed_for_5track_lab": is_stable_baseline,
+        "paper_default_change_allowed": False,
+        "paper_default_change_requirements": [
+            "C12 real backtest PASS",
+            "deploy_candidate dry-run PASS",
+            "service_readiness_status PASS",
+            "prelive_gate PASS",
+            "paper broker evidence PASS",
+        ],
+        "allowed_claim": (
+            "현재 paper 운영을 시작하기에 evidence chain이 가장 완성된 "
+            "stable paper baseline이자 research benchmark anchor"
+        ),
+        "forbidden_claims": [
+            "전역 최적 모델",
+            "production deploy 후보",
+            "C12 없이 paper default로 승격 가능한 research 모델",
+            "5-track의 5개 모델 중 하나",
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class PolicySpec:
     policy_id: str
@@ -90,6 +137,7 @@ class PolicySpec:
     mode: str
     profile_prefix: str
     description: str
+    launch_delay_sec: float
     overrides: dict[str, Any]
 
 
@@ -204,6 +252,11 @@ def _load_policies(config: dict[str, Any]) -> list[PolicySpec]:
         mode = str(raw.get("mode") or "shadow").strip().lower()
         if mode not in {"paper", "shadow"}:
             raise ValueError(f"unsupported policy mode for {policy_id}: {mode}")
+        launch_delay_sec = _parse_nonnegative_float(
+            policy_id,
+            "launch_delay_sec",
+            raw.get("launch_delay_sec", 0),
+        )
         overrides = dict(raw.get("overrides") or {})
         _validate_override_keys(policy_id, overrides)
         _validate_override_values(policy_id, overrides)
@@ -214,6 +267,7 @@ def _load_policies(config: dict[str, Any]) -> list[PolicySpec]:
                 mode=mode,
                 profile_prefix=str(raw.get("profile_prefix") or "KIS_MAIN"),
                 description=str(raw.get("description") or ""),
+                launch_delay_sec=launch_delay_sec,
                 overrides=overrides,
             )
         )
@@ -241,6 +295,20 @@ def _validate_override_keys(policy_id: str, overrides: dict[str, Any]) -> None:
             raise ValueError(
                 f"{policy_id} contains unsupported ppo_weighting: {weighting}"
             )
+
+
+def _parse_nonnegative_float(policy_id: str, key: str, value: Any) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{policy_id} contains invalid nonnegative float for {key}: {value}")
+    try:
+        parsed = float(str(value).strip())
+    except Exception as e:
+        raise ValueError(
+            f"{policy_id} contains invalid nonnegative float for {key}: {value}"
+        ) from e
+    if parsed < 0:
+        raise ValueError(f"{policy_id} requires {key} >= 0: {value}")
+    return parsed
 
 
 def _validate_override_values(policy_id: str, overrides: dict[str, Any]) -> None:
@@ -294,6 +362,29 @@ def _resolve_registry_dir(repo_root: Path, raw: str | None) -> Path | None:
     return resolved
 
 
+def _stable_paper_registry_dir(repo_root: Path) -> Path:
+    return (repo_root / STABLE_PAPER_REGISTRY_REL).resolve()
+
+
+def _require_fixed_stable_baseline(
+    *,
+    repo_root: Path,
+    bundle_id: str,
+    registry_dir: Path | None,
+) -> None:
+    if bundle_id != STABLE_PAPER_BUNDLE_ID:
+        raise ValueError(
+            "5-track paper lab is fixed to stable baseline "
+            f"{STABLE_PAPER_BUNDLE_ID}; requested bundle_id={bundle_id}"
+        )
+    expected = _stable_paper_registry_dir(repo_root)
+    if registry_dir is None or registry_dir.resolve() != expected:
+        raise ValueError(
+            "5-track paper lab is fixed to registry_dir "
+            f"{STABLE_PAPER_REGISTRY_REL}; requested registry_dir={registry_dir}"
+        )
+
+
 def _as_list_tickers(raw: str | list[Any]) -> list[str]:
     if isinstance(raw, list):
         return [str(x).zfill(6) for x in raw if str(x).strip()]
@@ -339,6 +430,8 @@ def _profile_source_presence(env: dict[str, str], prefix: str) -> dict[str, bool
 def _env_for_policy(base_env: dict[str, str], policy: PolicySpec, repo_root: Path) -> dict[str, str]:
     env = dict(base_env)
     prefix = policy.profile_prefix
+    for key in KIS_TARGET_ENV_KEYS:
+        env.pop(key, None)
 
     def copy_first(target: str, suffixes: list[str]) -> None:
         for suffix in suffixes:
@@ -374,10 +467,199 @@ def _policy_overview(policy: PolicySpec, env: dict[str, str]) -> dict[str, Any]:
         "mode": policy.mode,
         "profile_prefix": policy.profile_prefix,
         "description": policy.description,
+        "launch_delay_sec": policy.launch_delay_sec,
+        "policy_hash": _policy_hash(policy),
+        "policy_hash_scope": "policy_id+mode+launch_delay_sec+runtime_overrides",
         "profile_source_presence": _profile_source_presence(env, policy.profile_prefix),
         "mapped_env_readiness": _readiness_from_env(env),
         "overrides": policy.overrides,
         "override_semantics": _override_semantics(policy),
+        "account_fairness_requirements": _account_fairness_requirements(),
+        "profile_guard": _profile_guard([policy], env),
+    }
+
+
+def _policy_hash(policy: PolicySpec) -> str:
+    material = {
+        "policy_id": policy.policy_id,
+        "mode": policy.mode,
+        "profile_prefix": policy.profile_prefix,
+        "launch_delay_sec": policy.launch_delay_sec,
+        "overrides": policy.overrides,
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _run_config_hash(
+    *,
+    policies: list[PolicySpec],
+    bundle_id: str,
+    registry_dir: str,
+    tickers: list[str],
+    cycles: int,
+    interval_sec: float,
+    prelive_required: bool,
+) -> str:
+    material = {
+        "bundle_id": bundle_id,
+        "registry_dir": registry_dir,
+        "tickers": tickers,
+        "cycles": cycles,
+        "interval_sec": interval_sec,
+        "prelive_required": prelive_required,
+        "policies": {
+            policy.policy_id: {
+                "policy_hash": _policy_hash(policy),
+                "mode": policy.mode,
+                "profile_prefix": policy.profile_prefix,
+            }
+            for policy in policies
+        },
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _profile_identity_hash(
+    *,
+    mode: str,
+    account_number: str,
+    product_code: str,
+) -> str:
+    material = {
+        "mode": mode.strip().lower(),
+        "account_number": account_number.strip(),
+        "product_code": product_code.strip(),
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _profile_guard(policies: list[PolicySpec], env: dict[str, str]) -> dict[str, Any]:
+    blockers: list[dict[str, Any]] = []
+    profiles: dict[str, dict[str, Any]] = {}
+    seen: dict[str, str] = {}
+    for policy in policies:
+        prefix = policy.profile_prefix
+        mode = str(env.get(f"{prefix}_MODE") or "").strip().lower()
+        account = str(
+            env.get(f"{prefix}_ACCOUNT_NUMBER")
+            or env.get(f"{prefix}_PAPER_ACCOUNT_NUMBER")
+            or ""
+        ).strip()
+        product = str(
+            env.get(f"{prefix}_ACCOUNT_PRODUCT_CODE")
+            or env.get(f"{prefix}_PAPER_ACCOUNT_PRODUCT_CODE")
+            or ""
+        ).strip()
+        has_key = bool(
+            str(env.get(f"{prefix}_APP_KEY") or env.get(f"{prefix}_PAPER_APP_KEY") or "").strip()
+        )
+        has_secret = bool(
+            str(env.get(f"{prefix}_APP_SECRET") or env.get(f"{prefix}_PAPER_APP_SECRET") or "").strip()
+        )
+        identity_hash = (
+            _profile_identity_hash(mode=mode, account_number=account, product_code=product)
+            if mode and account and product
+            else ""
+        )
+        profiles[policy.policy_id] = {
+            "profile_prefix": prefix,
+            "mode": mode or None,
+            "has_account_number": bool(account),
+            "has_account_product_code": bool(product),
+            "has_app_key": has_key,
+            "has_app_secret": has_secret,
+            "account_identity_hash": identity_hash,
+        }
+        missing = []
+        if mode != "virtual":
+            missing.append("virtual_mode")
+        if not account:
+            missing.append("account_number")
+        if not product:
+            missing.append("account_product_code")
+        if not has_key:
+            missing.append("app_key")
+        if not has_secret:
+            missing.append("app_secret")
+        if missing:
+            blockers.append(
+                {
+                    "policy_id": policy.policy_id,
+                    "reason": "profile_not_ready",
+                    "missing_or_invalid": missing,
+                    "profile_prefix": prefix,
+                }
+            )
+            continue
+        if identity_hash in seen:
+            blockers.append(
+                {
+                    "policy_id": policy.policy_id,
+                    "reason": "duplicate_account_identity",
+                    "profile_prefix": prefix,
+                    "duplicates_policy_id": seen[identity_hash],
+                    "account_identity_hash": identity_hash,
+                }
+            )
+        else:
+            seen[identity_hash] = policy.policy_id
+    return {
+        "status": "PASS" if not blockers else "BLOCKED",
+        "profiles": profiles,
+        "blockers": blockers,
+        "secrets_printed": False,
+    }
+
+
+def _account_fairness_requirements() -> dict[str, Any]:
+    return {
+        "separate_kis_profile_required": True,
+        "same_account_shared_across_paper_tracks_allowed": False,
+        "starting_nav_snapshot_required": True,
+        "starting_holdings_snapshot_required": True,
+        "pending_orders_must_be_empty_or_documented": True,
+        "comparison_basis": "normalized_nav_bps",
+    }
+
+
+def _evidence_schema() -> dict[str, Any]:
+    return {
+        "required_run_fields": [
+            "track_id",
+            "policy_id",
+            "mode",
+            "bundle_id",
+            "policy_hash",
+            "run_config_hash",
+            "cycles_completed",
+            "serving_feature_readiness",
+            "score_nonempty_cycles",
+            "rankable_score_cycles",
+            "order_delta_count",
+            "submitted_count",
+            "fill_count",
+            "reject_count",
+            "fail_closed_count",
+            "turnover_bps",
+            "daily_return_bps",
+        ],
+        "comparison_basis": "normalized_nav_bps",
+        "failure_case_card_required": True,
+        "pure_return_ranking_requires_time_alignment": True,
+    }
+
+
+def _prelive_skip_blocker() -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "reason": "prelive_skip_forbidden_for_runtime",
+        "message": (
+            "--skip-prelive is dry-run only. 5-track paper/shadow runtime must "
+            "keep the prelive/service-readiness gate in the evidence chain."
+        ),
     }
 
 
@@ -409,6 +691,14 @@ def _run_semantics(tickers: list[str]) -> dict[str, Any]:
         ),
         "runtime_enforced_fields": sorted(RUNTIME_OVERRIDE_KEYS),
         "replay_only_fields_not_enforced_here": sorted(SERVICE_REPLAY_ONLY_KEYS),
+        "account_fairness_requirements": _account_fairness_requirements(),
+        "evidence_schema": _evidence_schema(),
+        "operational_comparison_allowed": True,
+        "pure_return_ranking_allowed": False,
+        "pure_return_ranking_note": (
+            "Policy lab uses staggered launch offsets to reduce KIS API collisions. "
+            "Use normalized NAV bps with caveats, not pure same-second alpha ranking."
+        ),
     }
 
 
@@ -444,6 +734,154 @@ def _score_stats(scores: Any) -> dict[str, Any]:
         "score_abs_sum": float(sum(abs(v) for v in values)),
         "score_std": float(std),
         "rankable": bool(len(values) == 1 and nonzero) or bool(len(values) > 1 and std > 1e-12),
+    }
+
+
+def _summarize_native_paper_report(
+    report: dict[str, Any],
+    *,
+    policy: PolicySpec,
+    bundle_id: str,
+    run_config_hash: str,
+) -> dict[str, Any]:
+    cycles_stage = (report.get("stages") or {}).get("cycles")
+    items = cycles_stage.get("items") if isinstance(cycles_stage, dict) else []
+    if not isinstance(items, list):
+        items = []
+    serving_feature_readiness = (report.get("stages") or {}).get("serving_feature_readiness")
+    if not isinstance(serving_feature_readiness, dict):
+        serving_feature_readiness = {}
+
+    score_nonempty = 0
+    rankable = 0
+    blocked = 0
+    order_delta_count = 0
+    submitted = 0
+    fills = 0
+    rejects = 0
+    matched = 0
+    fail_closed = 0
+    max_turnover = 0.0
+    for cycle in items:
+        if not isinstance(cycle, dict):
+            continue
+        if cycle.get("status") == "FAIL":
+            fail_closed += 1
+        hot_result = cycle.get("hot_result")
+        if not isinstance(hot_result, dict):
+            continue
+        quant_output = hot_result.get("quant_output")
+        if isinstance(quant_output, dict):
+            stats = _score_stats(quant_output.get("scores"))
+            if int(stats.get("finite_score_count") or 0) > 0:
+                score_nonempty += 1
+            if stats.get("rankable"):
+                rankable += 1
+            if quant_output.get("mode") == "blocked" or quant_output.get("blocker"):
+                blocked += 1
+        final_decision = hot_result.get("final_decision")
+        if isinstance(final_decision, dict):
+            deltas = final_decision.get("order_deltas")
+            if isinstance(deltas, list):
+                order_delta_count += len(deltas)
+        pm_result = hot_result.get("pm_result")
+        if isinstance(pm_result, dict):
+            try:
+                max_turnover = max(max_turnover, float(pm_result.get("turnover") or 0.0))
+            except Exception:
+                pass
+        execution = cycle.get("execution")
+        if isinstance(execution, dict):
+            execution_report = execution.get("execution_report")
+            if isinstance(execution_report, dict):
+                fills_list = execution_report.get("fills")
+                rejects_list = execution_report.get("rejections")
+                if isinstance(fills_list, list):
+                    fills += len(fills_list)
+                    submitted += len(fills_list)
+                if isinstance(rejects_list, list):
+                    rejects += len(rejects_list)
+                    submitted += len(rejects_list)
+        history = cycle.get("order_history_verification")
+        if isinstance(history, dict):
+            queries = history.get("queries")
+            if isinstance(queries, list):
+                for query in queries:
+                    if isinstance(query, dict):
+                        matched += int(query.get("matched_order_count") or 0)
+
+    zero_order_false_pass = (
+        report.get("status") == "PASS"
+        and len(items) > 0
+        and score_nonempty == 0
+        and order_delta_count == 0
+        and submitted == 0
+    )
+    return {
+        "track_id": policy.policy_id,
+        "policy_id": policy.policy_id,
+        "mode": policy.mode,
+        "bundle_id": bundle_id,
+        "policy_hash": _policy_hash(policy),
+        "run_config_hash": run_config_hash,
+        "cycles_requested": ((report.get("params") or {}).get("cycles")),
+        "cycles_completed": len(items),
+        "serving_feature_readiness": serving_feature_readiness,
+        "score_nonempty_cycles": score_nonempty,
+        "blocked_quant_cycles": blocked,
+        "rankable_score_cycles": rankable,
+        "order_delta_count": order_delta_count,
+        "submitted_count": submitted,
+        "fill_count": fills,
+        "reject_count": rejects,
+        "matched_order_history_count": matched,
+        "fail_closed_count": fail_closed,
+        "turnover_bps": float(max_turnover) * 10000.0,
+        "daily_return_bps": None,
+        "zero_order_false_pass": zero_order_false_pass,
+    }
+
+
+def _summarize_shadow_result(
+    *,
+    policy: PolicySpec,
+    bundle_id: str,
+    run_config_hash: str,
+    cycle_reports: list[dict[str, Any]],
+    status: str,
+    serving_feature_readiness: dict[str, Any],
+) -> dict[str, Any]:
+    score_nonempty = sum(1 for c in cycle_reports if int(c.get("finite_score_count") or 0) > 0)
+    rankable = sum(1 for c in cycle_reports if c.get("rankable"))
+    fail_closed = sum(1 for c in cycle_reports if c.get("status") == "FAIL")
+    order_delta_count = sum(int(c.get("order_delta_count") or 0) for c in cycle_reports)
+    return {
+        "track_id": policy.policy_id,
+        "policy_id": policy.policy_id,
+        "mode": policy.mode,
+        "bundle_id": bundle_id,
+        "policy_hash": _policy_hash(policy),
+        "run_config_hash": run_config_hash,
+        "cycles_requested": len(cycle_reports),
+        "cycles_completed": len(cycle_reports),
+        "serving_feature_readiness": serving_feature_readiness,
+        "score_nonempty_cycles": score_nonempty,
+        "blocked_quant_cycles": sum(1 for c in cycle_reports if c.get("quant_mode") == "blocked"),
+        "rankable_score_cycles": rankable,
+        "order_delta_count": order_delta_count,
+        "submitted_count": 0,
+        "fill_count": 0,
+        "reject_count": 0,
+        "matched_order_history_count": 0,
+        "fail_closed_count": fail_closed,
+        "turnover_bps": 0.0,
+        "daily_return_bps": None,
+        "zero_order_false_pass": bool(
+            status == "PASS"
+            and cycle_reports
+            and score_nonempty == 0
+            and order_delta_count == 0
+        ),
     }
 
 
@@ -537,24 +975,45 @@ def _run_paper_child(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     bundle_id = str(args.bundle_id or defaults.get("bundle_id"))
+    run_config_hash = str(args.run_config_hash or "")
     trader = _new_trader(repo_root, run_dir, policy, bundle_id)
     applied = _apply_policy_overrides(trader, policy)
+    tickers = _as_list_tickers(args.tickers or defaults.get("tickers", ""))
+    cycles = int(args.cycles or defaults.get("cycles", 1))
+    interval_sec = float(args.interval_sec if args.interval_sec is not None else defaults.get("interval_sec", 0))
+    if not run_config_hash:
+        run_config_hash = _run_config_hash(
+            policies=[policy],
+            bundle_id=bundle_id,
+            registry_dir=str(args.registry_dir or defaults.get("registry_dir") or ""),
+            tickers=tickers,
+            cycles=cycles,
+            interval_sec=interval_sec,
+            prelive_required=not args.skip_prelive,
+        )
     report = trader.run(
-        tickers=_as_list_tickers(args.tickers or defaults.get("tickers", "")),
-        cycles=int(args.cycles or defaults.get("cycles", 1)),
-        interval_sec=float(args.interval_sec if args.interval_sec is not None else defaults.get("interval_sec", 0)),
+        tickers=tickers,
+        cycles=cycles,
+        interval_sec=interval_sec,
         confirm_phrase=str(args.confirm_phrase or defaults.get("confirm_phrase")),
         write_report=True,
+    )
+    evidence_summary = _summarize_native_paper_report(
+        report,
+        policy=policy,
+        bundle_id=bundle_id,
+        run_config_hash=run_config_hash,
     )
     return {
         "status": report.get("status"),
         "mode": "paper",
         "policy_id": policy.policy_id,
         "policy_label": policy.label,
+        "policy_hash": _policy_hash(policy),
+        "launch_delay_sec": policy.launch_delay_sec,
+        "evidence_summary": evidence_summary,
         **_safety_flags(external_kis_api=True),
-        "runtime_semantics": _run_semantics(
-            _as_list_tickers(args.tickers or defaults.get("tickers", ""))
-        ),
+        "runtime_semantics": _run_semantics(tickers),
         "applied_overrides": applied,
         "native_report": report,
     }
@@ -568,12 +1027,23 @@ def _run_shadow_child(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     bundle_id = str(args.bundle_id or defaults.get("bundle_id"))
+    run_config_hash = str(args.run_config_hash or "")
     trader = _new_trader(repo_root, run_dir, policy, bundle_id)
     applied = _apply_policy_overrides(trader, policy)
     tickers = _as_list_tickers(args.tickers or defaults.get("tickers", ""))
     cycles = int(args.cycles or defaults.get("cycles", 1))
     interval_sec = float(args.interval_sec if args.interval_sec is not None else defaults.get("interval_sec", 0))
     confirm_phrase = str(args.confirm_phrase or defaults.get("confirm_phrase"))
+    if not run_config_hash:
+        run_config_hash = _run_config_hash(
+            policies=[policy],
+            bundle_id=bundle_id,
+            registry_dir=str(args.registry_dir or defaults.get("registry_dir") or ""),
+            tickers=tickers,
+            cycles=cycles,
+            interval_sec=interval_sec,
+            prelive_required=not args.skip_prelive,
+        )
 
     cycle_reports: list[dict[str, Any]] = []
     guards = {
@@ -581,6 +1051,7 @@ def _run_shadow_child(
         "market_session_guard": None,
         "mode_guard": None,
         "active_model_guard": None,
+        "serving_feature_readiness": None,
     }
     if guards["start_guard"].get("status") == "PASS":
         guards["market_session_guard"] = trader._market_session_check()
@@ -588,14 +1059,31 @@ def _run_shadow_child(
         guards["mode_guard"] = trader._paper_mode_check()
     if (guards["mode_guard"] or {}).get("status") == "PASS":
         guards["active_model_guard"] = trader._active_model_check()
+    if (guards["active_model_guard"] or {}).get("status") == "PASS":
+        guards["serving_feature_readiness"] = trader._serving_feature_readiness_check(tickers)
 
     guard_statuses = [guard.get("status") for guard in guards.values() if isinstance(guard, dict)]
     if any(status not in {"PASS", None} for status in guard_statuses):
+        evidence_summary = _summarize_shadow_result(
+            policy=policy,
+            bundle_id=bundle_id,
+            run_config_hash=run_config_hash,
+            cycle_reports=[],
+            status="BLOCKED",
+            serving_feature_readiness=(
+                guards["serving_feature_readiness"]
+                if isinstance(guards.get("serving_feature_readiness"), dict)
+                else {}
+            ),
+        )
         return {
             "status": "BLOCKED",
             "mode": "shadow",
             "policy_id": policy.policy_id,
             "policy_label": policy.label,
+            "policy_hash": _policy_hash(policy),
+            "launch_delay_sec": policy.launch_delay_sec,
+            "evidence_summary": evidence_summary,
             **_safety_flags(external_kis_api=True),
             "runtime_semantics": _run_semantics(tickers),
             "applied_overrides": applied,
@@ -694,11 +1182,26 @@ def _run_shadow_child(
         status = "BLOCKED"
     elif score_rankable_cycles == 0:
         status = "BLOCKED"
+    evidence_summary = _summarize_shadow_result(
+        policy=policy,
+        bundle_id=bundle_id,
+        run_config_hash=run_config_hash,
+        cycle_reports=cycle_reports,
+        status=status,
+        serving_feature_readiness=(
+            guards["serving_feature_readiness"]
+            if isinstance(guards.get("serving_feature_readiness"), dict)
+            else {}
+        ),
+    )
     return {
         "status": status,
         "mode": "shadow",
         "policy_id": policy.policy_id,
         "policy_label": policy.label,
+        "policy_hash": _policy_hash(policy),
+        "launch_delay_sec": policy.launch_delay_sec,
+        "evidence_summary": evidence_summary,
         **_safety_flags(external_kis_api=True),
         "runtime_semantics": _run_semantics(tickers),
         "applied_overrides": applied,
@@ -721,21 +1224,47 @@ def _run_child(args: argparse.Namespace) -> int:
     if not selected:
         raise ValueError(f"unknown policy: {args.policy_id}")
     policy = selected[0]
-    _prepare_repo_imports(repo_root, str(args.registry_dir or defaults.get("registry_dir") or ""))
+    bundle_id = str(args.bundle_id or defaults.get("bundle_id"))
+    registry_dir = _resolve_registry_dir(
+        repo_root,
+        str(args.registry_dir or defaults.get("registry_dir") or ""),
+    )
+    _require_fixed_stable_baseline(
+        repo_root=repo_root,
+        bundle_id=bundle_id,
+        registry_dir=registry_dir,
+    )
+    _prepare_repo_imports(repo_root, str(registry_dir or ""))
 
     result: dict[str, Any] = {
         "generated_at": datetime.now(KST).isoformat(),
         "run_id": args.run_id,
         "repo_root": str(repo_root),
         "policy": _policy_overview(policy, os.environ),
-        **_safety_flags(external_kis_api=True),
+        **_safety_flags(external_kis_api=False),
         "prelive": None,
         "result": None,
     }
     try:
-        prelive_required = _safe_bool(defaults.get("prelive_required", True), default=True)
+        profile_guard = _profile_guard([policy], os.environ)
+        result["profile_guard"] = profile_guard
+        if profile_guard.get("status") != "PASS":
+            result["result"] = {
+                "status": "BLOCKED",
+                "reason": "kis_profile_not_ready",
+                "blockers": profile_guard.get("blockers", []),
+            }
+            _json_dump(run_dir / f"{policy.policy_id}.json", result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1
         if args.skip_prelive:
-            prelive_required = False
+            result["result"] = _prelive_skip_blocker()
+            _json_dump(run_dir / f"{policy.policy_id}.json", result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1
+        if policy.launch_delay_sec > 0:
+            time.sleep(policy.launch_delay_sec)
+        prelive_required = _safe_bool(defaults.get("prelive_required", True), default=True)
         if prelive_required:
             prelive = _prelive_report(repo_root, defaults, args)
             result["prelive"] = prelive
@@ -752,6 +1281,8 @@ def _run_child(args: argparse.Namespace) -> int:
             result["result"] = _run_paper_child(repo_root, run_dir, defaults, policy, args)
         else:
             result["result"] = _run_shadow_child(repo_root, run_dir, defaults, policy, args)
+        if isinstance(result["result"], dict):
+            result["external_kis_api"] = bool(result["result"].get("external_kis_api"))
     except Exception as e:
         result["result"] = {
             "status": "FAIL",
@@ -774,11 +1305,30 @@ def _dry_run(args: argparse.Namespace, config: dict[str, Any]) -> int:
         repo_root,
         str(args.registry_dir or defaults.get("registry_dir") or ""),
     )
+    bundle_id = str(args.bundle_id or defaults.get("bundle_id"))
+    _require_fixed_stable_baseline(
+        repo_root=repo_root,
+        bundle_id=bundle_id,
+        registry_dir=registry_dir,
+    )
     policies = _filter_policies(_load_policies(config), args.policy_id)
+    tickers = _as_list_tickers(args.tickers or defaults.get("tickers", ""))
+    cycles = int(args.cycles or defaults.get("cycles", 1))
+    interval_sec = float(args.interval_sec if args.interval_sec is not None else defaults.get("interval_sec", 0))
+    prelive_required = _safe_bool(defaults.get("prelive_required", True), default=True)
     items: list[dict[str, Any]] = []
     for policy in policies:
         env = _env_for_policy(os.environ, policy, repo_root)
         items.append(_policy_overview(policy, env))
+    run_config_hash = _run_config_hash(
+        policies=policies,
+        bundle_id=bundle_id,
+        registry_dir=str(registry_dir or ""),
+        tickers=tickers,
+        cycles=cycles,
+        interval_sec=interval_sec,
+        prelive_required=prelive_required,
+    )
     out = {
         "status": "PASS",
         "action": "local_policy_lab_dry_run",
@@ -786,14 +1336,24 @@ def _dry_run(args: argparse.Namespace, config: dict[str, Any]) -> int:
         "registry_dir": str(registry_dir) if registry_dir else None,
         "git_ignored_root": str(RUNS_DIR),
         "git_ignored_runs_dir": str(RUNS_DIR),
-        "bundle_id": str(args.bundle_id or defaults.get("bundle_id")),
-        "tickers": _as_list_tickers(args.tickers or defaults.get("tickers", "")),
-        "cycles": int(args.cycles or defaults.get("cycles", 1)),
-        "interval_sec": float(args.interval_sec if args.interval_sec is not None else defaults.get("interval_sec", 0)),
+        "bundle_id": bundle_id,
+        "model_positioning": _model_positioning(bundle_id),
+        "tickers": tickers,
+        "cycles": cycles,
+        "interval_sec": interval_sec,
+        "run_config_hash": run_config_hash,
         "policies": items,
         "runtime_semantics": _run_semantics(
-            _as_list_tickers(args.tickers or defaults.get("tickers", ""))
+            tickers
         ),
+        "daily_cross_track_summary_template": _cross_track_summary(
+            policies,
+            run_id="dry_run",
+            bundle_id=bundle_id,
+            tickers=tickers,
+            run_config_hash=run_config_hash,
+        ),
+        "profile_guard": _profile_guard(policies, os.environ),
         **_safety_flags(external_kis_api=False),
         "secrets_printed": False,
     }
@@ -810,6 +1370,145 @@ def _filter_policies(policies: list[PolicySpec], policy_id: str | None) -> list[
     return filtered
 
 
+def _cross_track_summary(
+    policies: list[PolicySpec],
+    *,
+    run_id: str,
+    bundle_id: str,
+    tickers: list[str],
+    run_config_hash: str,
+    completed: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    paper_tracks = [p.policy_id for p in policies if p.mode == "paper"]
+    shadow_tracks = [p.policy_id for p in policies if p.mode == "shadow"]
+    evidence_by_policy: dict[str, dict[str, Any]] = {}
+    for item in completed or []:
+        policy_id = str(item.get("policy_id") or "")
+        evidence = item.get("evidence_summary")
+        if policy_id and isinstance(evidence, dict):
+            evidence_by_policy[policy_id] = evidence
+
+    track_evidence: list[dict[str, Any]] = []
+    for policy in policies:
+        evidence = evidence_by_policy.get(policy.policy_id, {})
+        serving = evidence.get("serving_feature_readiness")
+        track_evidence.append({
+            "track_id": policy.policy_id,
+            "mode": policy.mode,
+            "policy_hash": _policy_hash(policy),
+            "status": evidence.get("status"),
+            "cycles_completed": int(evidence.get("cycles_completed") or 0),
+            "score_nonempty_cycles": int(evidence.get("score_nonempty_cycles") or 0),
+            "rankable_score_cycles": int(evidence.get("rankable_score_cycles") or 0),
+            "order_delta_count": int(evidence.get("order_delta_count") or 0),
+            "submitted_count": int(evidence.get("submitted_count") or 0),
+            "fill_count": int(evidence.get("fill_count") or 0),
+            "reject_count": int(evidence.get("reject_count") or 0),
+            "matched_order_history_count": int(
+                evidence.get("matched_order_history_count") or 0
+            ),
+            "fail_closed_count": int(evidence.get("fail_closed_count") or 0),
+            "turnover_bps": evidence.get("turnover_bps"),
+            "daily_return_bps": evidence.get("daily_return_bps"),
+            "zero_order_false_pass": bool(evidence.get("zero_order_false_pass")),
+            "serving_feature_readiness_status": (
+                serving.get("status") if isinstance(serving, dict) else None
+            ),
+        })
+    aggregate = {
+        "cycles_completed": sum(row["cycles_completed"] for row in track_evidence),
+        "score_nonempty_cycles": sum(row["score_nonempty_cycles"] for row in track_evidence),
+        "rankable_score_cycles": sum(row["rankable_score_cycles"] for row in track_evidence),
+        "order_delta_count": sum(row["order_delta_count"] for row in track_evidence),
+        "submitted_count": sum(row["submitted_count"] for row in track_evidence),
+        "fill_count": sum(row["fill_count"] for row in track_evidence),
+        "reject_count": sum(row["reject_count"] for row in track_evidence),
+        "matched_order_history_count": sum(
+            row["matched_order_history_count"] for row in track_evidence
+        ),
+        "fail_closed_count": sum(row["fail_closed_count"] for row in track_evidence),
+        "zero_order_false_pass_count": sum(
+            1 for row in track_evidence if row["zero_order_false_pass"]
+        ),
+    }
+    return {
+        "run_id": run_id,
+        "bundle_id": bundle_id,
+        "model_positioning": _model_positioning(bundle_id),
+        "run_config_hash": run_config_hash,
+        "tracks": [p.policy_id for p in policies],
+        "policy_hashes": {p.policy_id: _policy_hash(p) for p in policies},
+        "paper_tracks": paper_tracks,
+        "shadow_tracks": shadow_tracks,
+        "paper_track_count": len(paper_tracks),
+        "shadow_track_count": len(shadow_tracks),
+        "comparison_basis": "normalized_nav_bps",
+        "common_universe": True,
+        "common_tickers": tickers,
+        "separate_kis_profiles_required": True,
+        "common_start_time": False,
+        "pure_return_ranking_allowed": False,
+        "pure_return_ranking_note": (
+            "Track offsets reduce KIS API collisions. Compare operational stability "
+            "and normalized NAV bps with this caveat."
+        ),
+        "launch_offsets_sec": {p.policy_id: p.launch_delay_sec for p in policies},
+        "evidence_schema": _evidence_schema(),
+        "track_evidence": track_evidence,
+        "aggregate": aggregate,
+    }
+
+
+def _failure_case_cards(run_dir: Path, completed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for item in completed:
+        policy_id = str(item.get("policy_id") or "")
+        status = str(item.get("child_result_status") or "")
+        evidence_blockers = item.get("evidence_blockers") or []
+        if status == "PASS" and not evidence_blockers:
+            continue
+        card: dict[str, Any] = {
+            "failure_case_id": f"FC-{policy_id or 'UNKNOWN'}",
+            "track_id": policy_id,
+            "severity": "HIGH" if status in {"FAIL", "BLOCKED"} or evidence_blockers else "MEDIUM",
+            "status": status or "UNKNOWN",
+            "returncode": item.get("returncode"),
+            "report_path": item.get("report_path"),
+            "broker_order_submitted": None,
+            "fail_closed": status in {"FAIL", "BLOCKED"} or bool(evidence_blockers),
+            "reason_code": None,
+            "root_cause": None,
+            "evidence_blockers": evidence_blockers,
+            "action": "inspect child report and native paper-auto report",
+        }
+        path = run_dir / f"{policy_id}.json"
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            result = data.get("result") if isinstance(data, dict) else None
+            if isinstance(result, dict):
+                card["reason_code"] = result.get("reason") or result.get("status")
+                card["root_cause"] = result.get("error") or result.get("blocker")
+                evidence = result.get("evidence_summary")
+                if isinstance(evidence, dict):
+                    submitted = evidence.get("submitted_count")
+                    if submitted is not None:
+                        card["broker_order_submitted"] = int(submitted or 0) > 0
+                native = result.get("native_report")
+                if isinstance(native, dict):
+                    orders = native.get("orders")
+                    submitted = native.get("submitted_count")
+                    card["broker_order_submitted"] = (
+                        bool(card["broker_order_submitted"])
+                        or bool(orders)
+                        or bool(submitted)
+                    )
+        except Exception as e:
+            card["root_cause"] = f"{type(e).__name__}: {e}"
+        cards.append(card)
+    return cards
+
+
 def _run_parent(args: argparse.Namespace, config: dict[str, Any]) -> int:
     defaults = dict(config.get("run_defaults") or {})
     repo_root = _repo_root(defaults)
@@ -817,10 +1516,85 @@ def _run_parent(args: argparse.Namespace, config: dict[str, Any]) -> int:
         repo_root,
         str(args.registry_dir or defaults.get("registry_dir") or ""),
     )
+    bundle_id = str(args.bundle_id or defaults.get("bundle_id"))
+    _require_fixed_stable_baseline(
+        repo_root=repo_root,
+        bundle_id=bundle_id,
+        registry_dir=registry_dir,
+    )
     policies = _filter_policies(_load_policies(config), args.policy_id)
     run_id = _run_id(args.run_id)
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    tickers = _as_list_tickers(args.tickers or defaults.get("tickers", ""))
+    cycles = int(args.cycles or defaults.get("cycles", 1))
+    interval_sec = float(args.interval_sec if args.interval_sec is not None else defaults.get("interval_sec", 0))
+    prelive_required = _safe_bool(defaults.get("prelive_required", True), default=True)
+    run_config_hash = _run_config_hash(
+        policies=policies,
+        bundle_id=bundle_id,
+        registry_dir=str(registry_dir or ""),
+        tickers=tickers,
+        cycles=cycles,
+        interval_sec=interval_sec,
+        prelive_required=prelive_required,
+    )
+
+    profile_guard = _profile_guard(policies, os.environ)
+    if args.skip_prelive:
+        index = {
+            "status": "BLOCKED",
+            "generated_at": datetime.now(KST).isoformat(),
+            "run_id": run_id,
+            "repo_root": str(repo_root),
+            "bundle_id": bundle_id,
+            "model_positioning": _model_positioning(bundle_id),
+            "run_config_hash": run_config_hash,
+            "reason": "prelive_skip_forbidden_for_runtime",
+            "profile_guard": profile_guard,
+            "policies": [],
+            "runtime_semantics": _run_semantics(tickers),
+            "daily_cross_track_summary": _cross_track_summary(
+                policies,
+                run_id=run_id,
+                bundle_id=bundle_id,
+                tickers=tickers,
+                run_config_hash=run_config_hash,
+            ),
+            "failure_case_cards": [_prelive_skip_blocker()],
+            **_safety_flags(external_kis_api=False),
+            "secrets_printed": False,
+        }
+        _json_dump(run_dir / "index.json", index)
+        print(json.dumps(index, ensure_ascii=False, indent=2))
+        return 1
+    if profile_guard.get("status") != "PASS":
+        index = {
+            "status": "BLOCKED",
+            "generated_at": datetime.now(KST).isoformat(),
+            "run_id": run_id,
+            "repo_root": str(repo_root),
+            "bundle_id": bundle_id,
+            "model_positioning": _model_positioning(bundle_id),
+            "run_config_hash": run_config_hash,
+            "reason": "kis_profile_not_ready",
+            "profile_guard": profile_guard,
+            "policies": [],
+            "runtime_semantics": _run_semantics(tickers),
+            "daily_cross_track_summary": _cross_track_summary(
+                policies,
+                run_id=run_id,
+                bundle_id=bundle_id,
+                tickers=tickers,
+                run_config_hash=run_config_hash,
+            ),
+            "failure_case_cards": [],
+            **_safety_flags(external_kis_api=False),
+            "secrets_printed": False,
+        }
+        _json_dump(run_dir / "index.json", index)
+        print(json.dumps(index, ensure_ascii=False, indent=2))
+        return 1
 
     python = str(args.python or defaults.get("python") or sys.executable)
     max_parallel = max(1, int(defaults.get("max_parallel", 1)))
@@ -842,15 +1616,15 @@ def _run_parent(args: argparse.Namespace, config: dict[str, Any]) -> int:
             "--policy-id",
             policy.policy_id,
             "--bundle-id",
-            str(args.bundle_id or defaults.get("bundle_id")),
+            bundle_id,
             "--registry-dir",
             str(registry_dir or ""),
             "--tickers",
-            ",".join(_as_list_tickers(args.tickers or defaults.get("tickers", ""))),
+            ",".join(tickers),
             "--cycles",
-            str(int(args.cycles or defaults.get("cycles", 1))),
+            str(cycles),
             "--interval-sec",
-            str(float(args.interval_sec if args.interval_sec is not None else defaults.get("interval_sec", 0))),
+            str(interval_sec),
             "--end-date",
             str(args.end_date or defaults.get("end_date")),
             "--business-days",
@@ -859,9 +1633,9 @@ def _run_parent(args: argparse.Namespace, config: dict[str, Any]) -> int:
             str(int(args.max_tickers or defaults.get("max_tickers", 30))),
             "--confirm-phrase",
             str(args.confirm_phrase or defaults.get("confirm_phrase")),
+            "--run-config-hash",
+            run_config_hash,
         ]
-        if args.skip_prelive:
-            cmd.append("--skip-prelive")
         out_f = stdout_path.open("w", encoding="utf-8")
         err_f = stderr_path.open("w", encoding="utf-8")
         proc = subprocess.Popen(cmd, cwd=str(repo_root), env=env, stdout=out_f, stderr=err_f)
@@ -889,15 +1663,27 @@ def _run_parent(args: argparse.Namespace, config: dict[str, Any]) -> int:
         launched = still_running
 
     index = {
-        "status": "PASS" if _parent_completed_successfully(completed) else "BLOCKED",
+        "status": "PASS" if _parent_completed_successfully(run_dir, completed) else "BLOCKED",
         "generated_at": datetime.now(KST).isoformat(),
         "run_id": run_id,
         "repo_root": str(repo_root),
-        "bundle_id": str(args.bundle_id or defaults.get("bundle_id")),
+        "bundle_id": bundle_id,
+        "model_positioning": _model_positioning(bundle_id),
+        "run_config_hash": run_config_hash,
         "policies": completed,
         "runtime_semantics": _run_semantics(
-            _as_list_tickers(args.tickers or defaults.get("tickers", ""))
+            tickers
         ),
+        "daily_cross_track_summary": _cross_track_summary(
+            policies,
+            run_id=run_id,
+            bundle_id=bundle_id,
+            tickers=tickers,
+            run_config_hash=run_config_hash,
+            completed=completed,
+        ),
+        "profile_guard": profile_guard,
+        "failure_case_cards": _failure_case_cards(run_dir, completed),
         **_safety_flags(external_kis_api=bool(completed)),
         "secrets_printed": False,
     }
@@ -912,6 +1698,9 @@ def _child_report_state(path: Path) -> dict[str, Any]:
         "report_exists": path.exists(),
         "report_parse_error": None,
         "child_result_status": None,
+        "evidence_summary": None,
+        "evidence_valid": False,
+        "evidence_blockers": [],
     }
     if not path.exists():
         return state
@@ -922,12 +1711,47 @@ def _child_report_state(path: Path) -> dict[str, Any]:
         state["child_result_status"] = (
             result.get("status") if isinstance(result, dict) else None
         )
+        if isinstance(result, dict):
+            evidence = result.get("evidence_summary")
+            state["evidence_summary"] = evidence if isinstance(evidence, dict) else None
+            blockers = _evidence_blockers(evidence if isinstance(evidence, dict) else {})
+            state["evidence_blockers"] = blockers
+            state["evidence_valid"] = not blockers
     except Exception as e:
         state["report_parse_error"] = f"{type(e).__name__}: {e}"
     return state
 
 
-def _parent_completed_successfully(completed: list[dict[str, Any]]) -> bool:
+def _evidence_blockers(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    if not evidence:
+        return [{"reason": "missing_evidence_summary"}]
+    blockers: list[dict[str, Any]] = []
+    required = _evidence_schema()["required_run_fields"]
+    missing = [key for key in required if key not in evidence]
+    if missing:
+        blockers.append({"reason": "missing_evidence_fields", "fields": missing})
+    serving_feature_readiness = evidence.get("serving_feature_readiness")
+    if (
+        not isinstance(serving_feature_readiness, dict)
+        or serving_feature_readiness.get("status") != "PASS"
+    ):
+        blockers.append({
+            "reason": "serving_feature_readiness_not_pass",
+            "serving_feature_readiness": serving_feature_readiness,
+        })
+    if evidence.get("zero_order_false_pass"):
+        blockers.append({"reason": "zero_order_false_pass"})
+    cycles_completed = int(evidence.get("cycles_completed") or 0)
+    if cycles_completed < 1:
+        blockers.append({"reason": "no_cycles_completed"})
+    if int(evidence.get("score_nonempty_cycles") or 0) < 1:
+        blockers.append({"reason": "no_nonempty_quant_scores"})
+    if int(evidence.get("rankable_score_cycles") or 0) < 1:
+        blockers.append({"reason": "no_rankable_quant_scores"})
+    return blockers
+
+
+def _parent_completed_successfully(run_dir: Path, completed: list[dict[str, Any]]) -> bool:
     if not completed:
         return False
     return all(
@@ -935,6 +1759,7 @@ def _parent_completed_successfully(completed: list[dict[str, Any]]) -> bool:
         and item.get("report_exists") is True
         and not item.get("report_parse_error")
         and item.get("child_result_status") == "PASS"
+        and item.get("evidence_valid") is True
         for item in completed
     )
 
@@ -954,6 +1779,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tickers", type=int, default=0)
     parser.add_argument("--confirm-phrase", default="")
     parser.add_argument("--python", default="")
+    parser.add_argument("--run-config-hash", default="")
     parser.add_argument("--skip-prelive", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--child", action="store_true")
