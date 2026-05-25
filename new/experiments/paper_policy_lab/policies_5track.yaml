@@ -18,7 +18,8 @@ policies:
     label: 기준 정책
     mode: paper
     profile_prefix: KIS_MAIN
-    description: 현재 승인된 paper-auto 정책을 그대로 쓰는 기준선입니다.
+    launch_delay_sec: 0
+    description: 현재 paper default baseline을 그대로 쓰는 비교 기준 정책입니다.
     overrides:
       max_orders_per_cycle: 3
       max_order_qty_per_order: 1
@@ -32,6 +33,7 @@ policies:
     label: 보수 정책
     mode: paper
     profile_prefix: KIS_SAFE
+    launch_delay_sec: 10
     description: 주문 수와 비중을 줄여 체결/리스크 안정성을 보는 정책입니다.
     overrides:
       max_orders_per_cycle: 1
@@ -46,6 +48,7 @@ policies:
     label: 적극 소량 정책
     mode: paper
     profile_prefix: KIS_ACTIVE
+    launch_delay_sec: 20
     description: 동일 모델에서 더 많은 기회를 허용하되 주문 수량은 1주로 제한합니다.
     overrides:
       max_orders_per_cycle: 3
@@ -60,6 +63,7 @@ policies:
     label: Top-K 균등 정책
     mode: paper
     profile_prefix: KIS_TOPK
+    launch_delay_sec: 30
     description: PPO 비중 대신 Top-K 균등 비중으로 실제 paper 주문을 비교하는 정책입니다.
     overrides:
       max_orders_per_cycle: 3
@@ -74,6 +78,7 @@ policies:
     label: 엄격 게이트 정책
     mode: shadow
     profile_prefix: KIS_STRICT
+    launch_delay_sec: 40
     description: 더 강한 confidence/trade-probability gate를 shadow로 진단합니다. 2026-05-24 replay에서 0.35는 후보 22%를 거르고 주문이 남았지만 pass 1/8에 그쳐 첫날 paper 주문 트랙에서는 제외합니다.
     overrides:
       max_orders_per_cycle: 2

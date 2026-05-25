@@ -58,6 +58,7 @@ open-trading-api-main/
 
 # === 실험용 jupyter notebook (개인) ===
 notebooks/
+new/experiments/paper_policy_lab/runs/
 
 # === 다른 팀원 코드 (별도 공유 채널) ===
 예경님 코드/

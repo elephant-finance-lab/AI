@@ -11,6 +11,16 @@
 
 - `BUNDLE-20260521-POSTCLOSE`
 
+모델 지위:
+
+- 전역 최적 모델: 아님
+- paper default baseline: 맞음
+- research benchmark anchor: 맞음
+- 2026-05-26 paper 시작용 안정 후보: 맞음
+- production deploy 후보: 아님
+
+정확한 표현은 "`BUNDLE-20260521-POSTCLOSE`는 현재 paper 운영을 시작하기에 evidence chain이 가장 완성된 stable paper baseline이자 research benchmark anchor"이다. 새 `RESEARCH-*` 후보가 더 좋아 보여도 C12 real backtest, deploy dry-run, service readiness, prelive gate, paper broker evidence를 다시 통과하기 전까지 paper default로 올리지 않는다.
+
 핵심 비교 축:
 
 - 주문 빈도
@@ -36,15 +46,27 @@
 
 | Track | 주문 제출 | 역할 | 핵심 차이 |
 |---|---:|---|---|
-| `MAIN_BASELINE` | 예 | 팀 default 후보 | 현재 승인된 기준 정책 |
+| `MAIN_BASELINE` | 예 | 팀 default 후보 | 현재 paper default baseline |
 | `SAFE_SLOW` | 예 | 안정성 비교 | 주문 수/종목 수 축소, cash 증가, confidence 강화 |
 | `ACTIVE_SMALL` | 예 | 기회 탐색 | confidence 완화, 종목 수 증가, 수량 1주 유지 |
 | `TOPK_EQUAL` | 예 | PPO 대비 비교 | Top-K를 균등 비중으로 실제 paper 주문 비교 |
 | `STRICT_GATE` | 아니오(Shadow) | 강한 필터 비교 | confidence/trade-probability gate 강화, 첫날은 주문 후보만 기록 |
 
+첫날 기본 launch offset:
+
+| Track | Offset |
+|---|---:|
+| `MAIN_BASELINE` | 0초 |
+| `SAFE_SLOW` | 10초 |
+| `ACTIVE_SMALL` | 20초 |
+| `TOPK_EQUAL` | 30초 |
+| `STRICT_GATE` | 40초, shadow |
+
+offset은 전략 차이를 만들기 위한 값이 아니라 KIS balance/order/order-history 호출이 같은 초에 몰리는 것을 줄이기 위한 운영 안전 장치다.
+
 ## 4. 계좌 준비
 
-기준 구성은 KIS virtual/paper 계좌 5개다. 각 정책은 서로 다른 계좌에서 실제 paper 주문으로 운용한다. 계좌가 부족할 때만 일부 정책을 shadow로 내려 주문 후보만 기록한다.
+기준 구성은 KIS virtual/paper profile 5개다. 첫날 실제 주문 track은 `MAIN_BASELINE`, `SAFE_SLOW`, `ACTIVE_SMALL`, `TOPK_EQUAL` 4개이고, `STRICT_GATE`는 별도 profile로 balance/bars/guard만 읽는 shadow track이다. 여기서 shadow는 broker 주문 제출 금지라는 뜻이며, virtual read API는 후보와 guard를 계산하기 위해 profile/preflight 통과 후에만 허용한다. 같은 계좌를 여러 paper track이 공유하지 않으며, 계좌가 부족하거나 readiness가 불안하면 paper track도 shadow로 내려 주문 후보만 기록한다.
 
 필수 env profile:
 
@@ -81,6 +103,14 @@ export KIS_STRICT_ACCOUNT_PRODUCT_CODE=01
 ```
 
 각 계좌는 가능한 한 clean 상태로 시작한다. clean 계좌가 어렵다면 2026-05-26 09:00 직전 starting equity, 보유 포지션, 현금 잔고를 snapshot으로 고정해 성능 계산 기준점으로 사용한다.
+
+비교 공정성 기준:
+
+- 같은 계좌를 여러 paper track이 공유하지 않는다.
+- 시작 NAV 또는 현금 잔고 snapshot을 track별로 기록한다.
+- 기존 보유가 있으면 holdings snapshot을 남기고, 수익률은 normalized NAV 기준으로 비교한다.
+- pending order가 있으면 해당 track은 시작하지 않거나 예외 사유를 failure card에 기록한다.
+- track config는 `policy_hash`로 고정한다. 장중 config 수정은 금지하고, 수정 시 새 run 또는 새 policy id로 본다.
 
 ## 5. 장전 실행 순서
 
@@ -135,9 +165,23 @@ export KIS_STRICT_ACCOUNT_PRODUCT_CODE=01
 | `turnover` | 회전율 |
 | `fail_closed_count` | 안전 차단 횟수 |
 
+부가 evidence:
+
+- `policy_hash`
+- `launch_delay_sec`
+- `serving_feature_readiness`
+- `kis_retry_count`
+- `timeout_count`
+- `matched_order_history_count`
+- `failure_case_cards`
+
+일별 비교는 원화 손익보다 `normalized_nav_bps`, MDD, turnover, fill/reject, fail-closed count를 함께 본다.
+
 ## 8. 최적화 기준
 
 백테스트는 후보 생성 도구이고, paper 운영은 최종 검증 도구다.
+
+5-track 결과는 "수익률 1등 = 최적 정책"으로 해석하지 않는다. 모델은 고정되어 있고, 비교 대상은 실행정책의 runtime 안정성, 체결 품질, fail-closed 동작, turnover, drawdown이다.
 
 정책 변경은 장마감 후에만 한다. 변경 근거는 다음 세 가지가 모두 있어야 한다.
 
