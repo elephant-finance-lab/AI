@@ -395,7 +395,7 @@ class DualSourceScorer:
         scores: list[float] = []
         if use_finbert:
             try:
-                uncached = [t for t in valid_texts if t not in self._finbert_cache]
+                uncached = list(dict.fromkeys(t for t in valid_texts if t not in self._finbert_cache))
                 if uncached:
                     new_scores = _finbert_scores(
                         uncached,
