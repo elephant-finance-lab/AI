@@ -343,6 +343,8 @@ class DualSourceScorer:
         self._manipulation_rules: list[dict] = load_manipulation_rules().get("rules", [])
         self._sentiment_dict: dict = load_sentiment_dict()
 
+        self._finbert_cache: dict[str, float] = {}
+
         logger.info(
             "[dual_source] 초기화 완료: news_decay=%.2f comm_decay=%.2f "
             "peak_lag=%dd noise_z=%.1f div_threshold=%.2f",
@@ -393,10 +395,15 @@ class DualSourceScorer:
         scores: list[float] = []
         if use_finbert:
             try:
-                scores = _finbert_scores(
-                    valid_texts,
-                    batch_size=self._finbert_batch_size,
-                )
+                uncached = [t for t in valid_texts if t not in self._finbert_cache]
+                if uncached:
+                    new_scores = _finbert_scores(
+                        uncached,
+                        batch_size=self._finbert_batch_size,
+                    )
+                    for t, s in zip(uncached, new_scores):
+                        self._finbert_cache[t] = s
+                scores = [self._finbert_cache[t] for t in valid_texts]
             except Exception as e:
                 logger.warning("[dual_source] FinBERT batch 추론 실패 fallback: %s", e)
                 source_note = "finbert_fallback"
