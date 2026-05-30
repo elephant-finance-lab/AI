@@ -12,6 +12,7 @@ import math
 import uuid
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -319,6 +320,7 @@ def build_recommendations_payload(
     resolved_top_k = max(1, min(resolved_top_k, int(cfg["max_top_k"])))
     diagnostics["top_k"] = resolved_top_k
 
+    _t_quant_init = perf_counter()
     try:
         quant = quant_agent or _make_recommendation_quant_agent(
             bundle_id=requested_bundle_id,
@@ -335,6 +337,7 @@ def build_recommendations_payload(
             include_diagnostics=include_diagnostics,
         )
 
+    diagnostics["timing_quant_init_ms"] = round((perf_counter() - _t_quant_init) * 1000, 2)
     metadata = getattr(quant, "model_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     model_version = str(metadata.get("version") or "")
@@ -353,6 +356,7 @@ def build_recommendations_payload(
             include_diagnostics=include_diagnostics,
         )
 
+    _t_bars = perf_counter()
     try:
         client = market_data_client or _make_recommendation_market_client()
         latest_ts: list[str] = []
@@ -400,6 +404,7 @@ def build_recommendations_payload(
             include_diagnostics=include_diagnostics,
         )
 
+    diagnostics["timing_bars_ms"] = round((perf_counter() - _t_bars) * 1000, 2)
     resolved_asof = requested_asof or (max(latest_ts) if latest_ts else "")
     if not resolved_asof:
         return _recommendation_blocked_payload(
@@ -411,7 +416,9 @@ def build_recommendations_payload(
             include_diagnostics=include_diagnostics,
         )
 
+    _t_score = perf_counter()
     quant_output = quant.score_cross_section(selected_tickers, asof=resolved_asof)
+    diagnostics["timing_score_ms"] = round((perf_counter() - _t_score) * 1000, 2)
     quant_output = quant_output if isinstance(quant_output, dict) else {}
     diagnostics["quant_output"] = quant_output
     mode = str(quant_output.get("mode") or "blocked")
