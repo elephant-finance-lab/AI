@@ -1205,9 +1205,12 @@ service_policy_replay:
   # 2026-05-21 deterministic sweep (BUNDLE-20260521-POSTCLOSE, 20250922~20251024):
   # top_k=0.10 + spread=0.020 kept order caps/cooldown intact while improving
   # service-policy replay from +34.35bps/SR 7.92 to +38.45bps/SR 8.54.
+  # 2026-06-02 DCD research sweep (BUNDLE-20260601-DCD577EA, 20250930~20251103):
+  # top_k=0.15 + stride=30 ranked best among 24 read-only configs
+  # (+83.86bps/SR 11.10/MDD -0.0750%) with order caps/cooldown intact.
   # Re-run C12/C14 after changes.
-  top_k_fraction: 0.10
-  decision_stride_bars: 15
+  top_k_fraction: 0.15
+  decision_stride_bars: 30
   min_holding_bars: 195
   rebalance_cooldown_bars: 195
   no_trade_score_spread: 0.020
