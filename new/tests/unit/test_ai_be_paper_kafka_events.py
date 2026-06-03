@@ -243,7 +243,7 @@ def test_start_validation_normalizes_tickers_and_accepts_valid_request() -> None
     result = _validate_paper_auto_start_args(
         bundle_id="BUNDLE-1",
         cycles=1,
-        interval_sec=0,
+        interval_sec=60,
         tickers=tickers,
         invalid_tickers=invalid,
         confirm_phrase="PAPER_AUTO_OK",
@@ -252,6 +252,24 @@ def test_start_validation_normalizes_tickers_and_accepts_valid_request() -> None
     )
 
     assert result == {"status": "PASS", "tickers": ["005930", "000660"]}
+
+
+def test_start_validation_rejects_sub_minute_interval() -> None:
+    tickers, invalid = _normalize_start_tickers(["5930", "000660"])
+
+    result = _validate_paper_auto_start_args(
+        bundle_id="BUNDLE-1",
+        cycles=1,
+        interval_sec=10,
+        tickers=tickers,
+        invalid_tickers=invalid,
+        confirm_phrase="PAPER_AUTO_OK",
+        required_confirm_phrase="PAPER_AUTO_OK",
+        max_tickers=30,
+    )
+
+    assert result["status"] == "INVALID_ARGUMENT"
+    assert result["reason"] == "interval_sec_must_be_at_least_60"
 
 
 def test_load_active_start_tickers_uses_universe_ssot(monkeypatch) -> None:
