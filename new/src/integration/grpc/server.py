@@ -670,10 +670,10 @@ def _validate_paper_auto_start_args(
         }
     if cycles <= 0:
         return {"status": "INVALID_ARGUMENT", "reason": "cycles_must_be_positive"}
-    if interval_sec < 0:
+    if interval_sec < 60:
         return {
             "status": "INVALID_ARGUMENT",
-            "reason": "interval_sec_must_be_non_negative",
+            "reason": "interval_sec_must_be_at_least_60",
         }
     if invalid_tickers:
         return {
