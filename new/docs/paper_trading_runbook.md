@@ -189,7 +189,7 @@ required features must block before broker reads or orders.
 ```bash
 # In an operator-approved shell, inject API credentials without printing them.
 # Do not commit credential-loading commands or secret values.
-export PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new
+export PYTHONPATH=$PWD/new
 /opt/anaconda3/envs/elephant/bin/python new/scripts/build_dart_corp_code_cache.py
 /opt/anaconda3/envs/elephant/bin/python new/scripts/build_news_dart_archive.py \
   --end-date 20260526 \
@@ -238,11 +238,11 @@ the rehearsal blocks with `active_version_null`.
 ```bash
 # In an operator-approved shell, inject KIS paper credentials without printing them.
 # Do not commit credential-loading commands or secret values.
-export PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new
+export PYTHONPATH=$PWD/new
 /opt/anaconda3/envs/elephant/bin/python new/scripts/collect_kis_paper_evidence.py \
   --bundle-id BUNDLE-20260521-POSTCLOSE \
   --registry-dir artifacts/lgbm_paper_candidate/BUNDLE-20260521-POSTCLOSE \
-  --tickers 005930,000660,042700,403870,058470 \
+  --tickers 005930 \
   --ticker 005930 \
   --side buy \
   --qty 1 \
@@ -254,6 +254,11 @@ export PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new
   --auto-confirm-phrase PAPER_AUTO_OK
 ```
 
+This service-rehearsal command intentionally uses one ticker for the external
+paper order-path probe. It proves balance, reconciliation, probe order, order
+history, and paper-auto service evidence for the candidate bundle. It is not a
+30-stock cadence proof.
+
 Use `--assume-empty-system-positions` only when the latest paper balance shows a
 flat system account. If the operator manually changes paper holdings before the
 open, refresh the system position snapshot first and do not reuse stale `/tmp`
@@ -262,7 +267,7 @@ files from prior trading days.
 After evidence PASS, rerun read-only status gates:
 
 ```bash
-export PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new
+export PYTHONPATH=$PWD/new
 /opt/anaconda3/envs/elephant/bin/python new/scripts/service_readiness_status.py \
   --bundle-id BUNDLE-20260521-POSTCLOSE
 /opt/anaconda3/envs/elephant/bin/python new/scripts/prelive_gate.py \
@@ -279,17 +284,22 @@ longer windows.
 ```bash
 # In an operator-approved shell, inject KIS paper credentials without printing them.
 # Do not commit credential-loading commands or secret values.
-export PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new
+export PYTHONPATH=$PWD/new
 /opt/anaconda3/envs/elephant/bin/python new/scripts/paper_auto_trade.py \
   --bundle-id BUNDLE-20260521-POSTCLOSE \
   --registry-dir artifacts/lgbm_paper_candidate/BUNDLE-20260521-POSTCLOSE \
-  --tickers 005930,000660,042700,403870,058470 \
+  --tickers "" \
+  --max-tickers 30 \
   --cycles 60 \
   --interval-sec 60 \
   --end-date 20260521 \
   --business-days 253 \
   --confirm-phrase PAPER_AUTO_OK
 ```
+
+For `paper_auto_trade.py`, empty `--tickers ""` means load the active universe
+from `new/config/universe_config.yaml` and cap it with `--max-tickers 30`.
+Do not use the historical five-ticker semiconductor subset as 30-stock evidence.
 
 Only add `--cold-risk-report <path>` when a fresh `20260526` cold-risk report
 has been generated and inspected. Do not reuse stale reports from prior trading

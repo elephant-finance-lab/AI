@@ -73,7 +73,7 @@ Mode B 장마감 (18:00~22:00):
 ### 단위 테스트
 
 ```bash
-PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new \
+PYTHONPATH=$PWD/new \
   /opt/anaconda3/envs/elephant/bin/python -m pytest new/tests/unit -q
 ```
 

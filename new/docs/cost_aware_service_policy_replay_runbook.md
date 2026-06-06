@@ -26,8 +26,9 @@ All values are loaded from `new/config/risk_config.yaml`.
 ## Command
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
 ELEPHANT_MODE=mode_b \
-PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new \
+PYTHONPATH=$PWD/new \
 /opt/anaconda3/envs/elephant/bin/python \
   new/scripts/service_policy_replay.py \
   --bundle-id BUNDLE-20260512-0AEEE37A
@@ -36,8 +37,9 @@ PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new \
 Optional explicit replay window:
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
 ELEPHANT_MODE=mode_b \
-PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new \
+PYTHONPATH=$PWD/new \
 /opt/anaconda3/envs/elephant/bin/python \
   new/scripts/service_policy_replay.py \
   --bundle-id BUNDLE-20260512-0AEEE37A \

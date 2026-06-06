@@ -84,7 +84,7 @@ class PersistentCache:
             raw_path = self._cfg.get("storage_path", _DEFAULT_CONFIG["storage_path"])
             # Codex 권고 1, 2026-05-09 fix: parents[4] → parents[3].
             # 이전: /Users/jangjaewon/Desktop/artifacts/cache/... (잘못된 root 한 단계 위).
-            # 현재: /Users/jangjaewon/Desktop/Elephant_Lab/artifacts/cache/... (repo root 정합).
+            # 현재: repo root 하위 artifacts/cache/... (Full_Part/Elephant_Lab 이동 후에도 정합).
             candidate = Path(raw_path)
             if not candidate.is_absolute():
                 resolved = Path(__file__).resolve().parents[3] / candidate

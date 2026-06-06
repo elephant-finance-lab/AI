@@ -124,17 +124,21 @@ BE 추천종목 화면은 `GetRecommendations`를 호출한다.
 Python stub 생성:
 
 ```bash
-PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new \
+# repository root로 이동
+cd "$(git rev-parse --show-toplevel)"
+PYTHONPATH=$PWD/new \
 /opt/anaconda3/envs/elephant/bin/python \
-/Users/jangjaewon/Desktop/Elephant_Lab/new/scripts/generate_ai_grpc_stubs.py
+new/scripts/generate_ai_grpc_stubs.py
 ```
 
 AI gRPC 서버 실행:
 
 ```bash
-PYTHONPATH=/Users/jangjaewon/Desktop/Elephant_Lab/new \
+# repository root로 이동
+cd "$(git rev-parse --show-toplevel)"
+PYTHONPATH=$PWD/new \
 /opt/anaconda3/envs/elephant/bin/python \
-/Users/jangjaewon/Desktop/Elephant_Lab/new/scripts/run_ai_grpc_server.py \
+new/scripts/run_ai_grpc_server.py \
   --host 127.0.0.1 \
   --port 50051 \
   --bundle-id BUNDLE-20260521-POSTCLOSE

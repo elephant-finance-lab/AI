@@ -1,0 +1,129 @@
+timezone: Asia/Seoul
+mode: selected-paper-service
+
+safety:
+  live_trading_allowed: false
+  safe_to_enable_live_actions: false
+  registry_mutated: false
+  production_active_version: null
+  require_kis_virtual: true
+  allow_real_order: false
+  allow_live_order: false
+
+bundle:
+  primary: BUNDLE-20260602-DEED529F
+  fallback: BUNDLE-20260601-DCD577EA
+  allow_auto_switch: false
+
+universe:
+  source: universe_config.yaml
+  expected_count: 30
+  tickers_arg: ""
+  max_tickers: 30
+
+execution_policy:
+  recommendation_universe: active_universe_30t
+  default_target_scope: selected_tickers
+  selected_tickers_required_for_user_start: true
+  max_selected_tickers: 10
+  user_selected_tickers_trade_only: true
+  empty_tickers_meaning: active_universe_30t_system_default
+  note: "FE/BE user flow starts paper-auto with explicit selected recommendation tickers. Empty tickers is reserved for system/default 30T paper service."
+
+demo_policy:
+  strict_cadence_required: false
+  allow_fda_veto_skip: true
+  allow_service_policy_skip: true
+  allow_kafka_not_verified: true
+  gap_over_60s_is_warning: true
+  min_interval_sec: 60
+  cached_recommendation_is_advisory_only: true
+
+preopen:
+  - id: infra_health
+    time: "08:00"
+    required: true
+  - id: trading_day_check
+    time: "08:05"
+    required: true
+  - id: bundle_freeze
+    time: "08:10"
+    required: true
+  - id: kis_virtual_preflight
+    time: "08:20"
+    required: false
+    demo_blocker: false
+  - id: service_readiness
+    time: "08:30"
+    required: true
+  - id: recommendation_cache_check
+    time: "08:40"
+    required: true
+  - id: fe_smoke_ready
+    time: "08:50"
+    required: false
+    demo_blocker: false
+
+market:
+  - id: first_market_data_collection
+    time: "09:00"
+    required: true
+  - id: recommendation_refresh
+    window: "09:00-15:20"
+    repeat_sec: 60
+    required: true
+  - id: paper_auto_start
+    time: "09:05"
+    required: true
+  - id: paper_auto_monitor
+    window: "09:05-15:20"
+    repeat_sec: 60
+    required: true
+  - id: paper_auto_stop_prepare
+    time: "15:20"
+    required: true
+  - id: paper_auto_stop
+    time: "15:30"
+    required: true
+
+postmarket:
+  - id: paper_reconciliation
+    time: "15:35"
+    required: true
+  - id: daily_paper_report
+    time: "15:45"
+    required: true
+  - id: be_fe_status_cache_update
+    time: "15:55"
+    required: true
+
+mode_b:
+  - id: post_close_data_update
+    time: "18:00"
+    required: false
+  - id: dual_source_history_update
+    time: "18:30"
+    required: false
+  - id: feature_backfill
+    time: "19:00"
+    required: false
+  - id: lgbm_retrain
+    time: "19:30"
+    required: false
+  - id: backtest
+    time: "20:30"
+    required: false
+  - id: service_policy_replay
+    time: "21:00"
+    required: false
+  - id: deploy_dry_run
+    time: "21:30"
+    required: false
+  - id: next_day_readiness
+    time: "22:00"
+    required: false
+
+closeout:
+  - id: daily_closeout
+    time: "23:00"
+    required: true
